@@ -1,0 +1,11 @@
+conversation
+pruebas.ipynb
+pruebas.py
+RAG
+.env
+.codex
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
