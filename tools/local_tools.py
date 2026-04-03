@@ -212,6 +212,121 @@ total_tools = [
     },
     {
         "type": "function",
+        "name": "web_fetch",
+        "description": "Descarga el contenido HTML/JSON de una URL. Usar para consultar APIs, leer páginas web estáticas o verificar endpoints. Para páginas con JS dinámico o interacción usa playwright_navigate.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL completa a descargar (incluyendo https://)"
+                },
+                "method": {
+                    "type": "string",
+                    "description": "'GET' (default) o 'POST'",
+                    "enum": ["GET", "POST"]
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Cabeceras HTTP opcionales (e.g. Authorization, Content-Type)"
+                },
+                "data": {
+                    "type": "object",
+                    "description": "Cuerpo de la petición para POST (se enviará como JSON)"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout en segundos (default 15, max 60)"
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Máximo de caracteres a retornar del cuerpo de la respuesta"
+                }
+            }
+        },
+        "required": ["url"]
+    },
+    {
+        "type": "function",
+        "name": "playwright_navigate",
+        "description": "Navega e interactúa con páginas web usando un navegador real (Chromium headless). Usar para páginas con JavaScript dinámico, formularios, scraping avanzado o capturas de pantalla. Para páginas estáticas o APIs usar web_fetch.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "URL completa a navegar (incluyendo https://)"
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Acción a realizar: 'navigate' (cargar y devolver HTML), 'click' (hacer clic en un elemento), 'fill' (rellenar un campo), 'get_text' (obtener texto de un elemento), 'screenshot' (captura de pantalla en base64)",
+                    "enum": ["navigate", "click", "fill", "get_text", "screenshot"]
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "Selector CSS o XPath del elemento (requerido para click, fill, get_text)"
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Texto a introducir en el campo (requerido para fill)"
+                },
+                "wait_for": {
+                    "type": "string",
+                    "description": "Selector CSS a esperar antes de retornar (útil para contenido dinámico)"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout en segundos (default 15, max 60)"
+                },
+                "headless": {
+                    "type": "boolean",
+                    "description": "Ejecutar sin interfaz gráfica (default true)"
+                }
+            }
+        },
+        "required": ["url"]
+    },
+    {
+        "type": "function",
+        "name": "memory_search",
+        "description": """Esta herramienta tiene accceso a todo el historial de connversaciones y acciones de todos los agentes. Ante la minima duda de un evento, pasado, acción o dato, se debe buscar""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "vector_search": {
+                    "type": "string",
+                    "description": "Texto de búsqueda optimizado para busqueda vectorial"
+                },
+                "K": {
+                    "type": "string",
+                    "description": "Limite de resultados por busqueda (default:5, max:25)"
+                },
+                "session_id": {
+                    "type":"string",
+                    "description": "En caso de saber la conversación/session o querer indagar mas concretamente en alguna sesion concreta se usará este campo para el fitrado"
+                }
+            }
+        },
+        "required": ["vectorSearch", "K"]
+    },
+    {
+        "type": "function",
+        "name": "StoreActions",
+        "description": """Esta herramineta se usará para almacenar un historial resumido 10-1000 palabras 
+        con lo que se ha realizado a lo largo de la conversación""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Consulta web deseada"
+                }
+            }
+        },
+        "required": ["query"]
+    },
+    {
+        "type": "function",
         "name": "WebSearchAgent",
         "description": "Busca información en la web según objetivos solicitados",
         "parameters": {

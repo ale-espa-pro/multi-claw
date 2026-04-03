@@ -5,7 +5,7 @@ import redis.asyncio as redis
 class RedisSessionManager:
     """Manejador de sesiones y contexto persistido en Redis."""
     
-    def __init__(self, redis_url: str = "redis://localhost:6379", context_ttl: int = 3600 * 24):
+    def __init__(self, redis_url: str = "redis://localhost:6379", context_ttl: int = 120):
         self.redis_url = redis_url
         self.redis_client = None
         self.context_ttl = context_ttl  # 24 horas por defecto

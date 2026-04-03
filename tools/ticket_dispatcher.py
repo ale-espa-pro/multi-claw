@@ -22,20 +22,21 @@ from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 
 from RAG.qdrant_server.qdrant_server import RAGService
-
+from tools.memoryTools.RAG_memory import MemoryRag
 # ── Env / Clients / RAG ─────────────────────────────────────────────
 
 load_dotenv()
-
+RAG = MemoryRag()
 qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 user_preferences_path = os.getenv("USER_PREFERENCES_PATH", "/tmp/user_preferences.txt")
 
+'''
 RAG = RAGService(
     openai_client=openai_client,
     qdrant_client=qdrant_client,
     docs_dir=os.getenv("RAG_DOCS_DIR", "/home/ale/python/portillo/RAG/generated"),
-)
+)'''
 
 # ── Constantes ───────────────────────────────────────────────────────
 
@@ -440,6 +441,146 @@ def action_run_python(body: dict) -> dict:
     return resp
 
 
+async def action_web_fetch(body: dict) -> dict:
+    """
+    Descarga el contenido de una URL vía HTTP.
+    Requiere: url (str).
+    Opcional: method ('GET'|'POST', default 'GET'), headers (dict),
+              data (dict|str, para POST), timeout (int, default 15),
+              max_chars (int).
+    """
+    import httpx
+
+    url = (body.get("url") or "").strip()
+    if not url:
+        return {"success": False, "error": "missing required field: url"}
+
+    method = (body.get("method") or "GET").upper()
+    if method not in ("GET", "POST"):
+        return {"success": False, "error": "method must be 'GET' or 'POST'"}
+
+    headers = body.get("headers") or {}
+    data = body.get("data")
+    timeout = min(int(body.get("timeout") or 15), 60)
+    max_chars = max(int(body.get("max_chars") or DEFAULT_MAX_CHARS), 1)
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+            if method == "POST":
+                if isinstance(data, dict):
+                    response = await client.post(url, json=data, headers=headers)
+                else:
+                    response = await client.post(url, content=data or "", headers=headers)
+            else:
+                response = await client.get(url, headers=headers)
+
+        content_type = response.headers.get("content-type", "")
+        text = response.text
+        truncated = len(text) > max_chars
+
+        return {
+            "success": response.is_success,
+            "url": str(response.url),
+            "status_code": response.status_code,
+            "content_type": content_type,
+            "truncated": truncated,
+            "content": text[:max_chars],
+        }
+    except httpx.TimeoutException:
+        return {"success": False, "error": "timeout exceeded", "url": url}
+    except Exception as e:
+        return {"success": False, "error": str(e), "url": url}
+
+
+async def action_playwright_navigate(body: dict) -> dict:
+    """
+    Navega y/o interactúa con una página web usando Playwright (Chromium headless).
+    Requiere: url (str).
+    Opcional:
+      - action: 'navigate' (default) | 'click' | 'fill' | 'screenshot' | 'get_text'
+      - selector (str): selector CSS/XPath para click/fill/get_text
+      - value (str): texto a introducir en fill
+      - wait_for (str): selector a esperar antes de retornar
+      - timeout (int, default 15, max 60): segundos
+      - headless (bool, default True)
+    """
+    from playwright.async_api import async_playwright
+
+    url = (body.get("url") or "").strip()
+    if not url:
+        return {"success": False, "error": "missing required field: url"}
+
+    action = (body.get("action") or "navigate").lower()
+    selector = body.get("selector") or ""
+    value = body.get("value") or ""
+    wait_for = body.get("wait_for") or ""
+    timeout_s = min(int(body.get("timeout") or 15), 60)
+    timeout_ms = timeout_s * 1000
+    headless = body.get("headless", True)
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=headless)
+            page = await browser.new_page()
+            await page.goto(url, timeout=timeout_ms)
+
+            if wait_for:
+                await page.wait_for_selector(wait_for, timeout=timeout_ms)
+
+            result: dict = {"success": True, "url": page.url, "action": action}
+
+            if action == "navigate":
+                result["title"] = await page.title()
+                result["content"] = (await page.content())[:DEFAULT_MAX_CHARS]
+
+            elif action == "click":
+                if not selector:
+                    await browser.close()
+                    return {"success": False, "error": "selector required for 'click'"}
+                await page.click(selector, timeout=timeout_ms)
+                result["title"] = await page.title()
+
+            elif action == "fill":
+                if not selector:
+                    await browser.close()
+                    return {"success": False, "error": "selector required for 'fill'"}
+                await page.fill(selector, value, timeout=timeout_ms)
+                result["filled"] = value
+
+            elif action == "get_text":
+                if not selector:
+                    await browser.close()
+                    return {"success": False, "error": "selector required for 'get_text'"}
+                text = await page.inner_text(selector, timeout=timeout_ms)
+                result["text"] = text
+
+            elif action == "screenshot":
+                screenshot_bytes = await page.screenshot(full_page=True)
+                result["screenshot_base64"] = base64.b64encode(screenshot_bytes).decode("ascii")
+                result["bytes"] = len(screenshot_bytes)
+
+            else:
+                await browser.close()
+                return {"success": False, "error": f"unknown action: {action}"}
+
+            await browser.close()
+            return result
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "url": url}
+
+
+async def action_memory_search(body: dict):
+    result = await RAG.search_similar_chunks(
+        #session_id=body.get("session_id", None),
+        session_id=None,
+        query=body.get("vector_search", ""),
+        limit=body.get("K", 5),
+        conversation_type=None
+        )
+
+    return result
+
 def action_ask_user(body: dict):
     raise body["question"]
 
@@ -471,6 +612,9 @@ ticket_dispatcher: dict[str, callable] = {
     "run_command": action_run_command,
     "run_python": action_run_python,
     "search_files": action_search_files,
+    "web_fetch": action_web_fetch,
+    "playwright_navigate": action_playwright_navigate,
     "ask_user": action_ask_user,
     "save_preference": action_save_preference,
+    "memory_search" : action_memory_search
 }

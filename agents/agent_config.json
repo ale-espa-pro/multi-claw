@@ -1,0 +1,19 @@
+{
+    "ExecutorAgent": {
+        "tools": ["WebSearchAgent", "DeviceManagerAgent", "save_preference", "memory_search"],
+        "main": true,
+        "json_response": false
+    },
+    "WebSearchAgent": {
+        "tools": ["web_search", "playwright_navigate", "web_fetch", "memory_search"],
+        "json_response": true
+    },
+    "DeviceManagerAgent": {
+        "tools": ["read_file", "run_python", "search_files", "run_command", "write_file", "WebSearchAgent", "memory_search"],
+        "json_response": true
+    },
+    "CronosAgent": {
+        "tools": ["memory_search"],
+        "json_response": true
+    }
+}

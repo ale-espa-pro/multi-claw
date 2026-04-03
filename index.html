@@ -124,7 +124,13 @@
         }
         .conv-item:hover { background: var(--surface); }
         .conv-item.active { background: var(--surface); }
+        .conv-item-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
         .conv-item-title {
+            flex: 1;
             font-size: .82rem;
             font-weight: 500;
             color: var(--text);
@@ -132,6 +138,18 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .conv-delete {
+            width: 24px; height: 24px;
+            border-radius: 6px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-tertiary);
+            flex-shrink: 0;
+            transition: background .12s, color .12s;
+        }
+        .conv-item:hover .conv-delete { display: inline-flex; }
+        .conv-delete:hover { background: #3a2020; color: #e55; }
         .conv-item-time {
             font-size: .65rem;
             color: var(--text-tertiary);
@@ -421,7 +439,12 @@
                         :class="{ active: c.session_id === config.sessionId }"
                         @click="selectConversation(c.session_id)"
                     >
-                        <div class="conv-item-title">{{ c.title || 'Nueva conversación' }}</div>
+                        <div class="conv-item-row">
+                            <div class="conv-item-title">{{ c.title || 'Nueva conversación' }}</div>
+                            <span class="conv-delete" @click.stop="deleteConversation(c.session_id)" title="Eliminar">
+                                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 4h8M5 4V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1M10 4v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4"/></svg>
+                            </span>
+                        </div>
                         <div class="conv-item-time">{{ formatConversationTime(c.updated_at) }}</div>
                     </button>
                 </template>
@@ -647,6 +670,13 @@ createApp({
                 await this.scroll(true);
             } catch { this.messages = []; }
             finally { this.loadingConversation = false; }
+        },
+        async deleteConversation(id) {
+            try {
+                await fetch(`${this.config.apiUrl}/conversations/${id}`, { method: "DELETE" });
+                this.conversations = this.conversations.filter(c => c.session_id !== id);
+                if (id === this.config.sessionId) this.startNewConversation();
+            } catch {}
         },
         startNewConversation() {
             this.config.sessionId = genId();
