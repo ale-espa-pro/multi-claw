@@ -289,7 +289,9 @@ total_tools = [
     {
         "type": "function",
         "name": "memory_search",
-        "description": """Esta herramienta tiene accceso a todo el historial de connversaciones y acciones de todos los agentes. Ante la minima duda de un evento, pasado, acción o dato, se debe buscar""",
+        "description": """Esta herramienta tiene accceso a todo el historial de connversaciones y acciones de todos los agentes. 
+        Ante la minima duda de un evento, pasado, acción o dato, se debe buscar. Especialmente util en el caso de busqueda de información para 
+        workflows pasados, recopilar tareas cron, resultados de las mismas, diferencias, etc""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -311,7 +313,7 @@ total_tools = [
     },
     {
         "type": "function",
-        "name": "StoreActions",
+        "name": "store_actions",
         "description": """Esta herramineta se usará para almacenar un historial resumido 10-1000 palabras 
         con lo que se ha realizado a lo largo de la conversación""",
         "parameters": {

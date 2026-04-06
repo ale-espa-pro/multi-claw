@@ -136,6 +136,10 @@ class AgentBuilder:
         cron_list = self._list_directories(path)
         return f"Agentes Cron programados: \n -{cron_list} \n"
 
+    def _programing_tasks(self) -> str:
+
+        return f"Agentes Cron programados: \n -{cron_list} \n"
+
     @staticmethod
     def _preferences_section() -> str:
         path = os.environ.get("USER_PREFERENCES_PATH")
