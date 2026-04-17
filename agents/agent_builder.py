@@ -9,11 +9,11 @@ from tools.ticket_dispatcher import ticket_dispatcher
 load_dotenv()
 
 _DATOS_USUARIO = {
-    "system": "ubuntu-wsl2",
-    "telefono": "671301858",
-    "correo_principal": "alejandrorivasespaa@gmail.com",
-    "windows_path1": "/mnt/d/*",
-    "windows_path2": "/mnt/c/*"
+    "system": os.environ.get("USER_SYSTEM"),
+    "telefono": os.environ.get("USER_PHONE"),
+    "correo_principal": os.environ.get("USER_EMAIL"),
+    "windows_path1": os.environ.get("USER_WINDOWS_PATH1"),
+    "windows_path2": os.environ.get("USER_WINDOWS_PATH2"),
 }
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "agent_config.json")

@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import re
 from typing import Any
 
 from dotenv import load_dotenv
@@ -7,6 +9,32 @@ from openai import OpenAI
 
 from data.conversation_store import PostgresConversationStore
 from tools.memoryTools.semantic_splitter import EMBED_MODEL, semantic_split
+
+MAX_OUTPUT_CHARS = 200_000
+MAX_OUTPUT_WORDS = 20_000
+
+BLOCKED_SQL_KEYWORDS = {
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
+    "TRUNCATE", "GRANT", "REVOKE", "COPY", "EXECUTE", "CALL",
+}
+
+
+def _truncate_output(data: Any) -> dict:
+    """Serialize data and truncate to 200K chars / 20K words."""
+    output = json.dumps(data, default=str, ensure_ascii=False)
+    truncated = False
+
+    if len(output) > MAX_OUTPUT_CHARS:
+        output = output[:MAX_OUTPUT_CHARS]
+        truncated = True
+
+    if len(output.split()) > MAX_OUTPUT_WORDS:
+        output = " ".join(output.split()[:MAX_OUTPUT_WORDS])
+        truncated = True
+
+    if truncated:
+        return {"truncated": True, "result": output}
+    return {"truncated": False, "result": data}
 
 load_dotenv()
 
@@ -113,3 +141,43 @@ class MemoryRag:
             conversation_type=conversation_type,
             limit=limit,
         )
+
+    async def execute_safe_query(self, sql: str, embed_text: str | None = None) -> dict:
+        """Execute a read-only SQL query with optional embedding injection and output truncation."""
+        await self.connect()
+
+        # Inject embedding if requested
+        if embed_text and "$EMBEDDING$" in sql:
+            embedding = await asyncio.to_thread(self.embed_query, embed_text)
+            vector_literal = self.conversation_store._vector_literal(embedding)
+            sql = sql.replace("$EMBEDDING$", f"'{vector_literal}'")
+        elif "$EMBEDDING$" in sql and not embed_text:
+            return {"success": False, "error": "La query usa $EMBEDDING$ pero no se proporcionó embed_text"}
+
+        normalized = " ".join(sql.strip().split()).upper()
+
+        if not (
+            normalized.startswith("SELECT")
+            or normalized.startswith("WITH")
+            or normalized.startswith("EXPLAIN")
+        ):
+            return {
+                "success": False,
+                "error": "Solo se permiten consultas de lectura (SELECT / WITH / EXPLAIN)",
+            }
+
+        for kw in BLOCKED_SQL_KEYWORDS:
+            if re.search(rf"\b{kw}\b", normalized):
+                return {"success": False, "error": f"Operación no permitida: {kw}"}
+
+        try:
+            rows = await self.conversation_store.execute_readonly_query(sql)
+            out = _truncate_output(rows)
+            return {
+                "success": True,
+                "row_count": len(rows),
+                "truncated": out["truncated"],
+                "data": out["result"],
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}

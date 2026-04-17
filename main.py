@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 
 from agents.agent_builder import AgentBuilder
 from data.conversation_store import PostgresConversationStore
-from pydantic import BaseModel
 from data.schemas import (
     ChatRequest, ChatResponse,
     ConversationSummary, ConversationDetail,
@@ -110,16 +109,3 @@ async def delete_session(session_id: str):
 async def delete_conversation(session_id: str):
     await runner.delete_session(session_id)
     return {"status": "deleted"}
-
-
-class QueryRequest(BaseModel):
-    query: str
-
-
-@app.post("/query")
-async def execute_query(request: QueryRequest):
-    try:
-        rows = await conversation_store.execute_query(request.query)
-        return {"success": True, "rows": rows}
-    except Exception as e:
-        return {"success": False, "error": str(e)}

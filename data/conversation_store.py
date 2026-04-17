@@ -516,6 +516,16 @@ class PostgresConversationStore:
                 await cur.execute(query)
                 return await cur.fetchall()
 
+    async def execute_readonly_query(self, sql: str) -> list[dict[str, Any]]:
+        """Execute a SQL query inside a READ ONLY transaction for safety."""
+        pool = self._require_pool()
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute("SET TRANSACTION READ ONLY")
+                    await cur.execute(sql)
+                    return await cur.fetchall()
+
     async def load_context(self, session_id: str) -> dict[str, list[dict[str, Any]]]:
         pool = self._require_pool()
         async with pool.connection() as conn:

@@ -1,12 +1,13 @@
 import json
+import os
 import redis.asyncio as redis
 
 
 class RedisSessionManager:
     """Manejador de sesiones y contexto persistido en Redis."""
     
-    def __init__(self, redis_url: str = "redis://localhost:6379", context_ttl: int = 120):
-        self.redis_url = redis_url
+    def __init__(self, redis_url: str | None = None, context_ttl: int = 120):
+        self.redis_url = redis_url or os.getenv("REDIS_URL")
         self.redis_client = None
         self.context_ttl = context_ttl  # 24 horas por defecto
     

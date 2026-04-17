@@ -1,19 +1,19 @@
 {
     "ExecutorAgent": {
-        "tools": ["WebSearchAgent", "DeviceManagerAgent", "save_preference", "memory_search"],
+        "tools": ["WebSearchAgent", "DeviceManagerAgent", "save_preference", "memory_query"],
         "main": true,
         "json_response": false
     },
     "WebSearchAgent": {
-        "tools": ["web_search", "playwright_navigate", "web_fetch", "memory_search"],
+        "tools": ["web_search", "playwright_navigate", "web_fetch", "memory_query"],
         "json_response": true
     },
     "DeviceManagerAgent": {
-        "tools": ["read_file", "run_python", "search_files", "run_command", "write_file", "WebSearchAgent", "memory_search", "playwright_navigate", "web_fetch"],
+        "tools": ["read_file", "run_python", "search_files", "run_command", "write_file", "edit_file", "WebSearchAgent", "memory_query", "playwright_navigate", "web_fetch"],
         "json_response": true
     },
     "CronosAgent": {
-        "tools": ["memory_search"],
+        "tools": ["memory_query"],
         "json_response": true
     }
 }

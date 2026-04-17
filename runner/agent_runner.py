@@ -17,7 +17,7 @@ class AgentRunner:
         self,
         client,  # EXPECTED: openai.AsyncOpenAI
         agent_builder: AgentBuilder,
-        redis_url: str = "redis://localhost:6379",
+        redis_url: str | None = None,
         conversation_store: PostgresConversationStore | None = None,
         memory_rag: MemoryRag | None = None,
     ):

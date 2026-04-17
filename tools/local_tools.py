@@ -119,6 +119,39 @@ total_tools = [
     },
     {
         "type": "function",
+        "name": "edit_file",
+        "description": """Modifica un archivo existente reemplazando un fragmento de texto exacto por otro, sin reescribir el archivo entero.
+        Funciona como search-and-replace: busca 'old_text' en el archivo y lo sustituye por 'new_text'.
+        - old_text debe coincidir EXACTAMENTE con el contenido del archivo (incluyendo espacios, indentación y saltos de línea).
+        - Para eliminar texto, pasar new_text vacío ("").
+        - Para insertar texto, usar old_text como el contexto donde insertar y new_text como old_text + texto nuevo.
+        - replace_all: false (default) reemplaza solo la primera ocurrencia, true reemplaza todas.
+        Rutas permitidas: ~/Downloads, ~/Documents, ~/Desktop, /tmp, ~.""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Ruta absoluta del archivo a modificar"
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "Texto exacto a buscar en el archivo (debe ser único si replace_all es false)"
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "Texto de reemplazo"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "true para reemplazar todas las ocurrencias, false (default) solo la primera"
+                }
+            }
+        },
+        "required": ["path", "old_text", "new_text"]
+    },
+    {
+        "type": "function",
         "name": "run_command",
         "description": "Ejecuta un comando de terminal (bash/shell). Usar para: instalar paquetes (apt, pip), listar procesos, gestión de servicios, operaciones de sistema, git, docker, etc. NO usar para acciones destructivas (rm -rf /, sudo, etc.).",
         "parameters": {
@@ -288,28 +321,63 @@ total_tools = [
     },
     {
         "type": "function",
-        "name": "memory_search",
-        "description": """Esta herramienta tiene accceso a todo el historial de connversaciones y acciones de todos los agentes. 
-        Ante la minima duda de un evento, pasado, acción o dato, se debe buscar. Especialmente util en el caso de busqueda de información para 
-        workflows pasados, recopilar tareas cron, resultados de las mismas, diferencias, etc""",
+        "name": "memory_query",
+        "description": """Acceso COMPLETO a la base de datos de memoria del sistema multiagente via SQL.
+        Escribe la consulta SQL que necesites. Tienes libertad total para decidir cómo buscar: ILIKE, JOINs,
+        agregaciones, sub-queries, búsqueda vectorial con embeddings, o lo que sea necesario.
+
+        Para búsqueda semántica por embeddings, usa el placeholder $EMBEDDING$ en tu SQL y proporciona el
+        campo embed_text con el texto a vectorizar. El sistema generará el embedding y lo inyectará en la query.
+
+        ## Esquema de la base de datos ##
+
+        **multiagente.conversations**
+        | columna            | tipo          | descripción                                              |
+        |--------------------|---------------|----------------------------------------------------------|
+        | session_id         | TEXT (PK)     | Identificador único de la sesión/conversación             |
+        | context_jsonb      | JSONB         | Contexto completo (mensajes, tool calls, resultados)      |
+        | username           | TEXT          | Usuario asociado                                          |
+        | metadata           | JSONB         | Metadatos adicionales                                     |
+        | conversation_type  | TEXT          | Tipo: 'cron', 'workflow', NULL para normales              |
+        | created_at         | TIMESTAMPTZ   | Fecha de creación                                         |
+        | updated_at         | TIMESTAMPTZ   | Última actualización                                      |
+        | archived_at        | TIMESTAMPTZ   | Fecha de archivado (NULL si activa)                       |
+
+        **multiagente.conversation_chunks**
+        | columna            | tipo                | descripción                                       |
+        |--------------------|---------------------|---------------------------------------------------|
+        | session_id         | TEXT (FK)           | Sesión a la que pertenece                          |
+        | message_order      | INTEGER             | Orden del chunk dentro de la sesión                |
+        | created_at         | TIMESTAMPTZ         | Fecha de creación                                  |
+        | updated_at         | TIMESTAMPTZ         | Última actualización                               |
+        | conversation_type  | TEXT                | Tipo de conversación                               |
+        | chunck             | TEXT                | Texto del chunk semántico                          |
+        | embedding          | halfvec(3072)       | Vector de embeddings (OpenAI text-embedding-3-large) |
+
+        ## Ejemplos de consultas ##
+        - Listar sesiones: SELECT session_id, conversation_type, created_at FROM multiagente.conversations ORDER BY updated_at DESC LIMIT 20
+        - Buscar texto: SELECT session_id, chunck FROM multiagente.conversation_chunks WHERE chunck ILIKE '%palabra%'
+        - Búsqueda vectorial: SELECT session_id, chunck, embedding <=> $EMBEDDING$::halfvec(3072) AS distance FROM multiagente.conversation_chunks ORDER BY distance LIMIT 10
+        - Vectorial + filtros: SELECT c.session_id, c.chunck, c.embedding <=> $EMBEDDING$::halfvec(3072) AS dist FROM multiagente.conversation_chunks c JOIN multiagente.conversations cv ON c.session_id = cv.session_id WHERE cv.conversation_type = 'cron' ORDER BY dist LIMIT 5
+        - Contexto de sesión: SELECT context_jsonb FROM multiagente.conversations WHERE session_id = 'xxx'
+        - Stats: SELECT session_id, COUNT(*) FROM multiagente.conversation_chunks GROUP BY session_id ORDER BY count DESC
+        - Buscar en JSONB: SELECT session_id FROM multiagente.conversations WHERE context_jsonb::text ILIKE '%keyword%'
+
+        NOTA: Solo SELECT/WITH. Output limitado a 200K caracteres / 20K palabras.""",
         "parameters": {
             "type": "object",
             "properties": {
-                "vector_search": {
+                "sql": {
                     "type": "string",
-                    "description": "Texto de búsqueda optimizado para busqueda vectorial"
+                    "description": "Consulta SQL a ejecutar. Puede usar $EMBEDDING$ como placeholder para búsqueda vectorial."
                 },
-                "K": {
+                "embed_text": {
                     "type": "string",
-                    "description": "Limite de resultados por busqueda (default:5, max:25)"
-                },
-                "session_id": {
-                    "type":"string",
-                    "description": "En caso de saber la conversación/session o querer indagar mas concretamente en alguna sesion concreta se usará este campo para el fitrado"
+                    "description": "Texto a convertir en embedding. Solo necesario si la query usa $EMBEDDING$."
                 }
             }
         },
-        "required": ["vectorSearch", "K"]
+        "required": ["sql"]
     },
     {
         "type": "function",

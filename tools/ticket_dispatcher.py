@@ -185,6 +185,73 @@ def action_write_file(body: dict) -> dict:
         return {"success": False, "path": real_path, "error": str(e)}
 
 
+def action_edit_file(body: dict) -> dict:
+    """
+    Modifica un archivo reemplazando old_text por new_text (search-and-replace).
+    Requiere: path, old_text, new_text.
+    Opcional: replace_all (bool, default False).
+    """
+    path = body.get("path")
+    old_text = body.get("old_text")
+    new_text = body.get("new_text")
+
+    if not path:
+        return {"success": False, "error": "missing required field: path"}
+    if old_text is None:
+        return {"success": False, "error": "missing required field: old_text"}
+    if new_text is None:
+        return {"success": False, "error": "missing required field: new_text"}
+
+    real_path = _resolve_path(path)
+
+    if not any(real_path.startswith(os.path.realpath(root)) for root in ALLOWED_WRITE_ROOTS):
+        return {
+            "success": False,
+            "error": f"edit not allowed outside: {ALLOWED_WRITE_ROOTS}",
+            "path": real_path,
+        }
+
+    if not os.path.isfile(real_path):
+        return {"success": False, "error": f"file not found: {real_path}"}
+
+    replace_all = bool(body.get("replace_all", False))
+
+    try:
+        with open(real_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+
+        count = content.count(old_text)
+
+        if count == 0:
+            return {
+                "success": False,
+                "error": "old_text not found in file",
+                "path": real_path,
+            }
+
+        if not replace_all and count > 1:
+            return {
+                "success": False,
+                "error": f"old_text found {count} times — set replace_all=true or provide more context to make it unique",
+                "path": real_path,
+                "occurrences": count,
+            }
+
+        new_content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
+
+        with open(real_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        replacements = count if replace_all else 1
+        return {
+            "success": True,
+            "path": real_path,
+            "replacements": replacements,
+        }
+    except Exception as e:
+        return {"success": False, "path": real_path, "error": str(e)}
+
+
 # ── Lectores por tipo ────────────────────────────────────────────────
 
 def _read_text(path: str, mime: str, max_chars: int) -> dict:
@@ -570,16 +637,12 @@ async def action_playwright_navigate(body: dict) -> dict:
         return {"success": False, "error": str(e), "url": url}
 
 
-async def action_memory_search(body: dict):
-    result = await RAG.search_similar_chunks(
-        #session_id=body.get("session_id", None),
-        session_id=None,
-        query=body.get("vector_search", ""),
-        limit=body.get("K", 5),
-        conversation_type=None
-        )
-
-    return result
+async def action_memory_query(body: dict):
+    sql = (body.get("sql") or "").strip()
+    if not sql:
+        return {"success": False, "error": "Campo 'sql' requerido"}
+    embed_text = (body.get("embed_text") or "").strip() or None
+    return await RAG.execute_safe_query(sql, embed_text=embed_text)
 
 def action_ask_user(body: dict):
     raise body["question"]
@@ -609,6 +672,7 @@ ticket_dispatcher: dict[str, callable] = {
     **{name: _passthrough_agent for name in _AGENTS},
     "read_file": action_read_file,
     "write_file": action_write_file,
+    "edit_file": action_edit_file,
     "run_command": action_run_command,
     "run_python": action_run_python,
     "search_files": action_search_files,
@@ -616,5 +680,5 @@ ticket_dispatcher: dict[str, callable] = {
     "playwright_navigate": action_playwright_navigate,
     "ask_user": action_ask_user,
     "save_preference": action_save_preference,
-    "memory_search" : action_memory_search
+    "memory_query": action_memory_query
 }
