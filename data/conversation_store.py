@@ -691,13 +691,15 @@ class PostgresConversationStore:
         session_id: str | None = None,
         conversation_type: str | None = None,
         limit: int = 5,
+        min_similarity: float | None = None,
     ) -> list[dict[str, Any]]:
         if not self._is_vector_enabled():
             return []
 
         pool = self._require_pool()
         filters: list[str] = ["embedding IS NOT NULL"]
-        params: list[Any] = [self._vector_literal(query_embedding)]
+        query_vector = self._vector_literal(query_embedding)
+        params: list[Any] = [query_vector]
 
         if session_id is not None:
             filters.append("session_id = %s")
@@ -706,6 +708,12 @@ class PostgresConversationStore:
         if conversation_type is not None:
             filters.append("conversation_type = %s")
             params.append(conversation_type)
+
+        if min_similarity is not None:
+            filters.append("(1 - (embedding <=> %s::{embedding_sql_cast})) >= %s".format(
+                embedding_sql_cast=self._embedding_sql_cast(),
+            ))
+            params.extend([query_vector, min_similarity])
 
         params.append(limit)
         where_clause = " AND ".join(filters)

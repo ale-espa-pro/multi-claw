@@ -128,10 +128,11 @@ class MemoryRag:
 
     async def search_similar_chunks(
         self,
-        session_id: str,
         query: str,
+        session_id: str | None = None,
         limit: int = 5,
         conversation_type: str | None = None,
+        min_similarity: float | None = None,
     ) -> list[dict[str, Any]]:
         await self.connect()
         query_embedding = await asyncio.to_thread(self.embed_query, query)
@@ -140,6 +141,7 @@ class MemoryRag:
             session_id=session_id,
             conversation_type=conversation_type,
             limit=limit,
+            min_similarity=min_similarity,
         )
 
     async def execute_safe_query(self, sql: str, embed_text: str | None = None) -> dict:

@@ -1,6 +1,8 @@
 # agent_runner.py
 import json
+import copy
 import asyncio
+import os
 from time import time
 from typing import Any, Optional
 import inspect
@@ -12,6 +14,22 @@ from tools.memoryTools.RAG_memory import MemoryRag
 
 
 class AgentRunner:
+
+    @staticmethod
+    def _normalize_similarity_threshold(value: Any, default: float = 0.35) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, min(1.0, numeric))
+
+    @staticmethod
+    def _normalize_retrieval_limit(value: Any, default: int = 5) -> int:
+        try:
+            numeric = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, numeric)
 
     def __init__(
         self,
@@ -29,6 +47,13 @@ class AgentRunner:
         self.max_messages = 15
         self.keep_after_reset = 7
         self.max_iterations = 120
+        self.memory_retrieval_limit = self._normalize_retrieval_limit(
+            os.getenv("MEMORY_RETRIEVAL_LIMIT", "5")
+        )
+        self.memory_min_similarity = self._normalize_similarity_threshold(
+            os.getenv("MEMORY_MIN_SIMILARITY", "0.35")
+        )
+        self.memory_query_max_chars = 12_000
 
         self.session_manager = RedisSessionManager(redis_url=redis_url)
         self.conversation_store = conversation_store
@@ -149,6 +174,87 @@ class AgentRunner:
     def _serialize_tool_result(result: Any) -> str:
         return json.dumps(result, ensure_ascii=False, default=str)
 
+    @staticmethod
+    def _serialize_user_payload(payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _build_user_message_item(text: str) -> dict[str, Any]:
+        return {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        }
+
+    def _prepare_memory_query(self, text: str) -> str:
+        compact = " ".join(text.split())
+        if len(compact) <= self.memory_query_max_chars:
+            return compact
+        return compact[:self.memory_query_max_chars]
+
+    def _format_retrieved_memory(self, chunks: list[dict[str, Any]]) -> str:
+        lines = [
+            "[EXTRA DE MEMORIA AUTOMATICA]",
+            (
+                "Estos fragmentos vienen de la base vectorial de conversaciones y son un extra "
+                "potencialmente util para contextualizar la solicitud actual o decidir si conviene "
+                "hacer una busqueda de memoria mas especifica. No forman parte literal del mensaje del usuario."
+            ),
+        ]
+
+        for idx, chunk in enumerate(chunks, start=1):
+            header = f"[{idx}] session_id={chunk.get('session_id', 'unknown')}"
+            conversation_type = chunk.get("conversation_type")
+            if conversation_type:
+                header += f" | conversation_type={conversation_type}"
+            score = chunk.get("score")
+            if isinstance(score, (int, float)):
+                header += f" | score={score:.4f}"
+            lines.append(header)
+            lines.append(str(chunk.get("chunck", "")).strip())
+
+        return "\n".join(lines)
+
+    async def _augment_user_message_with_memory(
+        self,
+        user_text: str,
+        exec_ctx: "ExecutionContext",
+    ) -> str:
+        if self.memory_rag is None:
+            return user_text
+        if self.memory_retrieval_limit <= 0:
+            return user_text
+
+        query_text = self._prepare_memory_query(user_text)
+        if not query_text:
+            return user_text
+
+        try:
+            chunks = await self.memory_rag.search_similar_chunks(
+                query=query_text,
+                limit=self.memory_retrieval_limit,
+                min_similarity=self.memory_min_similarity,
+            )
+        except Exception as exc:
+            print(f"\033[1;31m  [MEMORY] Retrieval error: {exc}\033[0m")
+            return user_text
+
+        if not chunks:
+            print(
+                f"\033[1;35m  [MEMORY] 0 chunks para {exec_ctx.session_id} "
+                f"(k={self.memory_retrieval_limit}, min_similarity={self.memory_min_similarity:.2f})\033[0m"
+            )
+            return user_text
+
+        print(
+            f"\033[1;35m  [MEMORY] {len(chunks)} chunks recuperados para "
+            f"{exec_ctx.session_id} "
+            f"(k={self.memory_retrieval_limit}, min_similarity={self.memory_min_similarity:.2f})\033[0m"
+        )
+        return f"{user_text}\n\n{self._format_retrieved_memory(chunks)}"
+
     def _schedule_semantic_memory_sync(
         self,
         session_id: str,
@@ -171,8 +277,8 @@ class AgentRunner:
                     conversation_type=conversation_type,
                     replace=True,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"\033[1;31m  [MEMORY] Sync error for {session_id}: {exc}\033[0m")
 
         task = asyncio.create_task(_runner())
         self._background_tasks.add(task)
@@ -354,7 +460,7 @@ class AgentRunner:
         if tool_name in self.agent_names:
             print(f"\033[1;35m  [{caller_agent}] → AGENT CALL → {tool_name}: \033[0m"
                   f"{json.dumps(tool_arguments, ensure_ascii=False)}")
-            result = await self._run_subagent(tool_name, json.dumps(tool_arguments, ensure_ascii=False), exec_ctx)
+            result = await self._run_subagent(tool_name, tool_arguments, exec_ctx)
             return call_id, result
 
         dispatcher = self.agent_builder.ticket_dispatcher
@@ -390,16 +496,18 @@ class AgentRunner:
     async def _run_subagent(
         self,
         agent_name: str,
-        task_description: str,
+        task_description: Any,
         exec_ctx: "ExecutionContext",
         max_iterations: int = 10,
     ):
-        exec_ctx.context[agent_name].append({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": json.dumps(task_description, ensure_ascii=False)}],
-        })
-        working_context = exec_ctx.context[agent_name].copy()
+        raw_user_text = self._serialize_user_payload(task_description)
+        exec_ctx.context[agent_name].append(self._build_user_message_item(raw_user_text))
+        self._truncate_context_if_needed(agent_name, exec_ctx)
+
+        working_context = copy.deepcopy(exec_ctx.context[agent_name])
+        working_context[-1] = self._build_user_message_item(
+            await self._augment_user_message_with_memory(raw_user_text, exec_ctx)
+        )
 
         for _ in range(max_iterations):
             response = await self._request_agent(agent_name, working_context, exec_ctx)
@@ -412,6 +520,7 @@ class AgentRunner:
                 if task is None:
                     continue
                 working_context.append(task)
+                exec_ctx.context[agent_name].append(task)
 
                 if task["type"] == "function_call":
                     function_calls.append(task)
@@ -422,34 +531,32 @@ class AgentRunner:
 
             if final_message and not function_calls:
                 print(f"\033[1;34m  └─ {agent_name} completado\033[0m")
-                exec_ctx.context[agent_name] = working_context
                 return final_message
 
             if function_calls:
                 tool_results = await self._execute_tools_parallel(function_calls, agent_name, exec_ctx)
                 for call_id, result in tool_results.items():
-                    working_context.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": self._serialize_tool_result(result),
-                        }
-                    )
+                    tool_output = {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": self._serialize_tool_result(result),
+                    }
+                    working_context.append(tool_output)
+                    exec_ctx.context[agent_name].append(tool_output)
 
-        exec_ctx.context[agent_name] = working_context
         return f"[{agent_name}] Máximo de iteraciones alcanzado"
 
     async def _chat(self, user_input: str, agent_name: str, exec_ctx: "ExecutionContext"):
-        exec_ctx.context[agent_name].append({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": user_input}],
-        })
+        exec_ctx.context[agent_name].append(self._build_user_message_item(user_input))
 
         self._truncate_context_if_needed(agent_name, exec_ctx)
+        working_context = copy.deepcopy(exec_ctx.context[agent_name])
+        working_context[-1] = self._build_user_message_item(
+            await self._augment_user_message_with_memory(user_input, exec_ctx)
+        )
 
         for _ in range(self.max_iterations):
-            response = await self._request_agent(agent_name, exec_ctx.context[agent_name], exec_ctx)
+            response = await self._request_agent(agent_name, working_context, exec_ctx)
 
             function_calls = []
             final_message: Optional[str] = None
@@ -458,6 +565,7 @@ class AgentRunner:
                 task = self._normalize_context_item(item.model_dump())
                 if task is None:
                     continue
+                working_context.append(task)
                 exec_ctx.context[agent_name].append(task)
 
                 if task["type"] == "function_call":
@@ -470,13 +578,13 @@ class AgentRunner:
             if function_calls:
                 tool_results = await self._execute_tools_parallel(function_calls, agent_name, exec_ctx)
                 for call_id, result in tool_results.items():
-                    exec_ctx.context[agent_name].append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": self._serialize_tool_result(result),
-                        }
-                    )
+                    tool_output = {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": self._serialize_tool_result(result),
+                    }
+                    working_context.append(tool_output)
+                    exec_ctx.context[agent_name].append(tool_output)
                 continue
 
             if final_message:

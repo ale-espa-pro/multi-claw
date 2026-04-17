@@ -19,24 +19,14 @@ from difflib import SequenceMatcher
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from qdrant_client import QdrantClient
 
-from RAG.qdrant_server.qdrant_server import RAGService
 from tools.memoryTools.RAG_memory import MemoryRag
 # ── Env / Clients / RAG ─────────────────────────────────────────────
 
 load_dotenv()
 RAG = MemoryRag()
-qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 user_preferences_path = os.getenv("USER_PREFERENCES_PATH", "/tmp/user_preferences.txt")
-
-'''
-RAG = RAGService(
-    openai_client=openai_client,
-    qdrant_client=qdrant_client,
-    docs_dir=os.getenv("RAG_DOCS_DIR", "/home/ale/python/portillo/RAG/generated"),
-)'''
 
 # ── Constantes ───────────────────────────────────────────────────────
 

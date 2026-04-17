@@ -2,7 +2,6 @@ conversation
 pruebas.ipynb
 pruebas.py
 RAG
-qdrant_storage/
 .env
 .codex
 __pycache__/
