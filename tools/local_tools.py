@@ -321,6 +321,38 @@ total_tools = [
     },
     {
         "type": "function",
+        "name": "interpret_image",
+        "description": "Analiza una imagen con un modelo de visión y devuelve su interpretación. La fuente puede ser: ruta absoluta a un archivo local de imagen, URL http(s), data URI (data:image/...;base64,...) o string base64 puro. Si es base64 puro, indica el mime_type. Útil para describir, extraer texto (OCR), identificar objetos, leer capturas de pantalla, etc.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "Fuente de la imagen: path local, URL http(s), data URI completo o string base64 puro"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Pregunta o instrucción sobre la imagen. Default: descripción detallada"
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "Nivel de detalle del análisis visual (default 'auto')",
+                    "enum": ["low", "high", "auto"]
+                },
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME de la imagen cuando 'source' es base64 puro (e.g. 'image/png', 'image/jpeg'). Default 'image/png'"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Modelo de visión a usar. Default: el modelo estándar del sistema"
+                }
+            }
+        },
+        "required": ["source"]
+    },
+    {
+        "type": "function",
         "name": "memory_query",
         "description": """Acceso COMPLETO a la base de datos de memoria del sistema multiagente via SQL.
         Escribe la consulta SQL que necesites. Tienes libertad total para decidir cómo buscar: ILIKE, JOINs,

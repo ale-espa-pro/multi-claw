@@ -2,6 +2,7 @@
 ticket_dispatcher.py — Dispatch de acciones para agentes y herramientas.
 """
 
+import asyncio
 import base64
 import contextlib
 import io
@@ -31,10 +32,9 @@ user_preferences_path = os.getenv("USER_PREFERENCES_PATH", "/tmp/user_preference
 # ── Constantes ───────────────────────────────────────────────────────
 
 SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
-TEXT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml"}
+TEXT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml", ".sql"}
 DEFAULT_MAX_CHARS = 200_000
 DEFAULT_SEARCH_LIMIT = 50
-BINARY_PREVIEW_CAP = 200_000
 
 ALLOWED_WRITE_ROOTS = [
     os.path.expanduser("~/Downloads"),
@@ -350,14 +350,11 @@ def _read_pptx(path: str, mime: str, max_chars: int) -> dict:
 
 def _read_binary(path: str, mime: str) -> dict:
     size = os.path.getsize(path)
-    preview_bytes = min(size, BINARY_PREVIEW_CAP)
-    with open(path, "rb") as f:
-        raw = f.read(preview_bytes)
     return {
         "success": True, "path": path, "mime": mime, "kind": "binary",
-        "bytes": size, "preview_bytes": preview_bytes,
-        "base64_preview": base64.b64encode(raw).decode("ascii"),
-        "truncated": size > preview_bytes,
+        "bytes": size,
+        "preview_omitted": True,
+        "omission_reason": "binary preview disabled to avoid large base64 payloads in tool outputs",
     }
 
 
@@ -627,6 +624,98 @@ async def action_playwright_navigate(body: dict) -> dict:
         return {"success": False, "error": str(e), "url": url}
 
 
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+IMAGE_EXT_TO_MIME = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+}
+
+
+def _resolve_image_source(source: str, explicit_mime: str | None) -> str:
+    if source.startswith(("http://", "https://")) or source.startswith("data:image/"):
+        return source
+
+    candidate_path = _resolve_path(source)
+    if os.path.isfile(candidate_path):
+        size = os.path.getsize(candidate_path)
+        if size > MAX_IMAGE_BYTES:
+            raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes: {size}")
+        ext = os.path.splitext(candidate_path)[1].lower()
+        mime = explicit_mime or IMAGE_EXT_TO_MIME.get(ext) or mimetypes.guess_type(candidate_path)[0] or "image/png"
+        with open(candidate_path, "rb") as f:
+            raw = f.read()
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+    cleaned = "".join(source.split())
+    try:
+        decoded = base64.b64decode(cleaned, validate=True)
+    except Exception as exc:
+        raise ValueError(f"source is not a valid path, URL or base64: {exc}") from None
+    if len(decoded) > MAX_IMAGE_BYTES:
+        raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes: {len(decoded)}")
+    mime = explicit_mime or "image/png"
+    return f"data:{mime};base64,{cleaned}"
+
+
+def _extract_response_text(response) -> str:
+    parts: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        if getattr(item, "type", None) != "message":
+            continue
+        for chunk in getattr(item, "content", []) or []:
+            if getattr(chunk, "type", None) == "output_text":
+                text = getattr(chunk, "text", None)
+                if isinstance(text, str) and text:
+                    parts.append(text)
+    return "\n".join(parts)
+
+
+async def action_interpret_image(body: dict) -> dict:
+    """
+    Analiza una imagen con un modelo de visión vía Responses API.
+    Requiere: source (str) — path local, URL http(s), data URI o base64 puro.
+    Opcional: prompt (str), detail ('low'|'high'|'auto'), mime_type (str), model (str).
+    """
+    source = (body.get("source") or "").strip()
+    if not source:
+        return {"success": False, "error": "missing required field: source"}
+
+    prompt = (body.get("prompt") or "").strip() or "Describe detalladamente el contenido de esta imagen."
+    detail = body.get("detail", "auto")
+    if detail not in ("low", "high", "auto"):
+        detail = "auto"
+    model = body.get("model") or "gpt-5.4"
+    explicit_mime = (body.get("mime_type") or "").strip() or None
+
+    try:
+        image_url = await asyncio.to_thread(_resolve_image_source, source, explicit_mime)
+    except Exception as e:
+        return {"success": False, "error": f"cannot load image: {e}"}
+
+    try:
+        response = await openai_client.responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {"type": "input_image", "image_url": image_url, "detail": detail},
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        return {"success": False, "error": str(e), "model": model}
+
+    return {
+        "success": True,
+        "model": model,
+        "detail": detail,
+        "interpretation": _extract_response_text(response),
+    }
+
+
 async def action_memory_query(body: dict):
     sql = (body.get("sql") or "").strip()
     if not sql:
@@ -670,5 +759,6 @@ ticket_dispatcher: dict[str, callable] = {
     "playwright_navigate": action_playwright_navigate,
     "ask_user": action_ask_user,
     "save_preference": action_save_preference,
-    "memory_query": action_memory_query
+    "memory_query": action_memory_query,
+    "interpret_image": action_interpret_image,
 }

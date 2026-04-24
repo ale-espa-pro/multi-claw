@@ -44,14 +44,14 @@ class AgentRunner:
         self.main_agent = agent_builder.main_agent
         self.agent_names = agent_builder.agent_names
 
-        self.max_messages = 15
-        self.keep_after_reset = 7
-        self.max_iterations = 120
+        self.max_messages = 120
+        self.keep_after_reset = 10
+        self.max_iterations = 400
         self.memory_retrieval_limit = self._normalize_retrieval_limit(
             os.getenv("MEMORY_RETRIEVAL_LIMIT", "5")
         )
         self.memory_min_similarity = self._normalize_similarity_threshold(
-            os.getenv("MEMORY_MIN_SIMILARITY", "0.35")
+            os.getenv("MEMORY_MIN_SIMILARITY", "0.45")
         )
         self.memory_query_max_chars = 12_000
 
