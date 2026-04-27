@@ -11,10 +11,11 @@ class TokenUsageTracker:
             "output_tokens": 0,
             "cached_tokens": 0,
             "total_tokens": 0,
-            "requests": 0
+            "requests": 0,
+            "context_window_tokens_by_agent": {}
         }
     
-    def accumulate(self, response):
+    def accumulate(self, response, agent_name=None):
         """Acumula el uso de tokens de una respuesta de OpenAI."""
         if hasattr(response, 'usage') and response.usage:
             usage = response.usage
@@ -32,6 +33,9 @@ class TokenUsageTracker:
             self.usage["cached_tokens"] += cached_tokens
             self.usage["total_tokens"] += input_tokens + output_tokens
             self.usage["requests"] += 1
+
+            if agent_name:
+                self.usage["context_window_tokens_by_agent"][agent_name] = input_tokens
     
     def print_summary(self):
         """Imprime el resumen de uso de tokens."""
@@ -48,6 +52,12 @@ class TokenUsageTracker:
         if self.usage['input_tokens'] > 0:
             cache_pct = (self.usage['cached_tokens'] / self.usage['input_tokens']) * 100
             print(f"  \033[1;35m📈 Cache hit rate:\033[0m {cache_pct:.1f}%")
+
+        context_windows = self.usage.get("context_window_tokens_by_agent", {})
+        if context_windows:
+            print(f"  \033[1;36m🧠 Context window tokens by agent:\033[0m")
+            for agent_name, tokens in sorted(context_windows.items()):
+                print(f"    - {agent_name}: {tokens:,}")
         
         print(f"\033[1;36m{'='*50}\033[0m\n")
     

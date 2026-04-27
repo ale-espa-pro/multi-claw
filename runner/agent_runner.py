@@ -51,7 +51,7 @@ class AgentRunner:
             os.getenv("MEMORY_RETRIEVAL_LIMIT", "5")
         )
         self.memory_min_similarity = self._normalize_similarity_threshold(
-            os.getenv("MEMORY_MIN_SIMILARITY", "0.45")
+            os.getenv("MEMORY_MIN_SIMILARITY", "0.52")
         )
         self.memory_query_max_chars = 12_000
 
@@ -445,7 +445,7 @@ class AgentRunner:
                 **kwargs,
             )
 
-        exec_ctx.token_tracker.accumulate(response)
+        exec_ctx.token_tracker.accumulate(response, agent_name=agent_name)
         return response
 
     async def _execute_tool(self, tool_call: dict, caller_agent: str, exec_ctx: "ExecutionContext"):
