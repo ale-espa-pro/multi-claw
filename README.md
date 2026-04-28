@@ -62,10 +62,8 @@ Multi-Claw es un framework de orquestación de agentes IA diseñado para ejecuta
 |---|---|---|
 | **ExecutorAgent** | Orquestador principal | Todos los sub-agentes |
 | **WebSearchAgent** | Búsqueda y navegación web | `web_fetch`, `playwright_navigate` |
-| **DeviceManagerAgent** | Control del sistema | `run_command`, `read_file`, `write_file` |
-| **CronosAgent** | Gestión de memoria histórica | `query_memory`, `semantic_search` |
-| **MCPManagerAgent** | Conexiones MCP | Protocolo Model Context |
-| **PlannerAgent** | Planificación de tareas | Descomposición de objetivos |
+| **DeviceManagerAgent** | Control del sistema | `run_command`, `read_file`, `write_file`, `run_python`|
+| **PlannerAgent** | Planificación de tareas | Descomposición de objetivos (DESACTIVADO EN MODELOS RAZONADORES/INNECESARIO)
 
 ---
 
@@ -89,17 +87,6 @@ Multi-Claw es un framework de orquestación de agentes IA diseñado para ejecuta
 - Webhook listo para recibir mensajes de WhatsApp
 - Respuestas automáticas vía Twilio API
 
-### 🔧 50+ herramientas nativas
-
-```
-Archivos      │ read_file · write_file · edit_file · search_files
-Sistema       │ run_command · run_python (sandbox) · list_processes
-Web           │ web_fetch · playwright_navigate · screenshot
-Memoria       │ query_memory · semantic_search · save_preference
-Automatiz.    │ create_simple_cron · create_agent_cron · workflow
-Interacción   │ ask_user · send_notification
-```
-
 ### 📊 Token tracking con caché de prompts
 - Monitoreo en tiempo real: tokens de entrada, salida y cacheados
 - Cálculo automático del cache hit rate
@@ -107,7 +94,7 @@ Interacción   │ ask_user · send_notification
 
 ### 🔒 Seguridad incorporada
 - Comandos bloqueados configurables
-- Ejecución Python en sandbox
+- Ejecución Python en sandbox (En progreso)
 - SQL de solo lectura para agentes
 - Validación estricta con Pydantic
 
@@ -118,7 +105,6 @@ Interacción   │ ask_user · send_notification
 | Tipo | Descripción | Persistencia |
 |---|---|---|
 | `normal` | Conversación estándar con historial completo | ✅ PostgreSQL + Redis |
-| `temporal` | Sin almacenamiento de memoria | ❌ Solo en memoria |
 | `cron` | Tarea programada automática | ✅ PostgreSQL |
 | `workflow` | Procedimiento multi-paso reutilizable | ✅ PostgreSQL |
 
@@ -128,7 +114,7 @@ Interacción   │ ask_user · send_notification
 
 ```
 Backend    FastAPI · Python 3.8+ · asyncio
-IA         OpenAI GPT-5 · text-embedding-3-large
+IA         OpenAI GPT-5-5.5 · text-embedding-3-large
 DB         PostgreSQL (psycopg async) · Redis
 Vector     pgvector halfvec(3072) · Qdrant (opcional)
 Frontend   Vanilla JS · HTML/CSS dark theme
