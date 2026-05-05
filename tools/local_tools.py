@@ -385,7 +385,8 @@ total_tools = [
         "name": "memory_query",
         "description": """Acceso COMPLETO a la base de datos de memoria del sistema multiagente via SQL.
         Escribe la consulta SQL que necesites. Tienes libertad total para decidir cómo buscar: ILIKE, JOINs,
-        agregaciones, sub-queries, búsqueda vectorial con embeddings, o lo que sea necesario.
+        agregaciones, sub-queries, búsqueda textual tipo BM25/FTS, búsqueda vectorial con embeddings,
+        o lo que sea necesario.
 
         Para búsqueda semántica por embeddings, usa el placeholder $EMBEDDING$ en tu SQL y proporciona el
         campo embed_text con el texto a vectorizar. El sistema generará el embedding y lo inyectará en la query.
@@ -415,9 +416,13 @@ total_tools = [
         | chunck             | TEXT                | Texto del chunk semántico                          |
         | embedding          | halfvec(3072)       | Vector de embeddings (OpenAI text-embedding-3-large) |
 
+        Índices relevantes: HNSW sobre embedding cuando pgvector está disponible y GIN FTS sobre
+        to_tsvector('simple', coalesce(chunck, '')) para búsqueda textual.
+
         ## Ejemplos de consultas ##
         - Listar sesiones: SELECT session_id, conversation_type, created_at FROM multiagente.conversations ORDER BY updated_at DESC LIMIT 20
         - Buscar texto: SELECT session_id, chunck FROM multiagente.conversation_chunks WHERE chunck ILIKE '%palabra%'
+        - Búsqueda textual FTS/BM25-like: WITH q AS (SELECT websearch_to_tsquery('simple', 'error postgres') AS query) SELECT session_id, chunck, ts_rank_cd(to_tsvector('simple', coalesce(chunck, '')), q.query) AS score FROM multiagente.conversation_chunks, q WHERE to_tsvector('simple', coalesce(chunck, '')) @@ q.query ORDER BY score DESC LIMIT 10
         - Búsqueda vectorial: SELECT session_id, chunck, embedding <=> $EMBEDDING$::halfvec(3072) AS distance FROM multiagente.conversation_chunks ORDER BY distance LIMIT 10
         - Vectorial + filtros: SELECT c.session_id, c.chunck, c.embedding <=> $EMBEDDING$::halfvec(3072) AS dist FROM multiagente.conversation_chunks c JOIN multiagente.conversations cv ON c.session_id = cv.session_id WHERE cv.conversation_type = 'cron' ORDER BY dist LIMIT 5
         - Contexto de sesión: SELECT context_jsonb FROM multiagente.conversations WHERE session_id = 'xxx'

@@ -76,6 +76,11 @@ class RunnerMultimodalTests(unittest.TestCase):
         self.assertIn("[ExecutorAgent] user: analiza", memory_text)
         self.assertIn("[ExecutorAgent] user: [1 imagen(es) adjunta(s)]", memory_text)
 
+    def test_retrieval_mode_normalization_is_conservative(self):
+        self.assertEqual(AgentRunner._normalize_retrieval_mode("hybrid"), "hybrid")
+        self.assertEqual(AgentRunner._normalize_retrieval_mode("keyword"), "keyword")
+        self.assertEqual(AgentRunner._normalize_retrieval_mode("unknown"), "vector")
+
 
 if __name__ == "__main__":
     unittest.main()

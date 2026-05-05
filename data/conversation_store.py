@@ -158,6 +158,10 @@ class PostgresConversationStore:
     def _embedding_index_ops(self) -> str:
         return "halfvec_cosine_ops"
 
+    @staticmethod
+    def _normalize_bm25_query(query: str) -> str:
+        return " ".join(str(query or "").split())
+
     def _build_snapshot_view(
         self,
         session_id: str,
@@ -330,6 +334,13 @@ class PostgresConversationStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_conversation_chunks_updated_at
                     ON {conversation_chunks_table} (updated_at DESC);
+                    """.format(conversation_chunks_table=self.conversation_chunks_table)
+                )
+                await cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_conversation_chunks_chunck_fts
+                    ON {conversation_chunks_table}
+                    USING gin (to_tsvector('simple', coalesce(chunck, '')));
                     """.format(conversation_chunks_table=self.conversation_chunks_table)
                 )
                 if self._is_vector_enabled():
@@ -756,6 +767,82 @@ class PostgresConversationStore:
                     "chunck": row["chunck"],
                     "distance": distance,
                     "score": 1.0 - distance,
+                }
+            )
+        return results
+
+    async def search_keyword_chunks(
+        self,
+        query: str,
+        session_id: str | None = None,
+        conversation_type: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        normalized_query = self._normalize_bm25_query(query)
+        if not normalized_query:
+            return []
+
+        pool = self._require_pool()
+        filters: list[str] = [
+            "to_tsvector('simple', coalesce(chunck, '')) @@ q.query"
+        ]
+        params: list[Any] = [normalized_query]
+
+        if session_id is not None:
+            filters.append("session_id = %s")
+            params.append(session_id)
+
+        if conversation_type is not None:
+            filters.append("conversation_type = %s")
+            params.append(conversation_type)
+
+        params.append(limit)
+        where_clause = " AND ".join(filters)
+
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
+                    """
+                    WITH q AS (
+                        SELECT websearch_to_tsquery('simple', %s) AS query
+                    )
+                    SELECT
+                        session_id,
+                        message_order,
+                        created_at,
+                        updated_at,
+                        conversation_type,
+                        chunck,
+                        ts_rank_cd(
+                            to_tsvector('simple', coalesce(chunck, '')),
+                            q.query
+                        ) AS keyword_score
+                    FROM {conversation_chunks_table}, q
+                    WHERE {where_clause}
+                    ORDER BY keyword_score DESC, updated_at DESC
+                    LIMIT %s
+                    """.format(
+                        conversation_chunks_table=self.conversation_chunks_table,
+                        where_clause=where_clause,
+                    ),
+                    params,
+                )
+                rows = await cur.fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            keyword_score = float(row["keyword_score"] or 0.0)
+            results.append(
+                {
+                    "session_id": row["session_id"],
+                    "message_order": row["message_order"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "conversation_type": row.get("conversation_type"),
+                    "chunck": row["chunck"],
+                    "keyword_score": keyword_score,
+                    "score": keyword_score,
+                    "retrieval_method": "keyword",
                 }
             )
         return results

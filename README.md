@@ -72,6 +72,7 @@ Multi-Claw es un framework de orquestación de agentes IA diseñado para ejecuta
 ### 🧠 Memoria semántica persistente
 - Conversaciones divididas en chunks semánticos con embeddings OpenAI
 - Búsqueda por similitud vectorial sobre el historial completo
+- Búsqueda textual FTS/BM25-like opcional y modo híbrido con fusión de rankings
 - Sincronización en background sin bloquear la respuesta
 
 ### ⚡ Ejecución paralela de herramientas

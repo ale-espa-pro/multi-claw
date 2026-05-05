@@ -144,6 +144,124 @@ class MemoryRag:
             min_similarity=min_similarity,
         )
 
+    async def search_keyword_chunks(
+        self,
+        query: str,
+        session_id: str | None = None,
+        limit: int = 5,
+        conversation_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        await self.connect()
+        return await self.conversation_store.search_keyword_chunks(
+            query=query,
+            session_id=session_id,
+            conversation_type=conversation_type,
+            limit=limit,
+        )
+
+    @staticmethod
+    def _merge_ranked_chunks(
+        vector_results: list[dict[str, Any]],
+        keyword_results: list[dict[str, Any]],
+        limit: int,
+        vector_weight: float = 0.7,
+        keyword_weight: float = 0.3,
+        rrf_k: int = 60,
+    ) -> list[dict[str, Any]]:
+        merged: dict[tuple[str, int], dict[str, Any]] = {}
+
+        def add_result(
+            result: dict[str, Any],
+            rank: int,
+            method: str,
+            weight: float,
+        ):
+            key = (str(result.get("session_id")), int(result.get("message_order", -1)))
+            current = merged.setdefault(key, dict(result))
+            current["score"] = float(current.get("score") or 0.0)
+            current["hybrid_score"] = float(current.get("hybrid_score") or 0.0)
+            current["hybrid_score"] += weight / (rrf_k + rank)
+
+            methods = set(str(current.get("retrieval_method") or "").split("+"))
+            methods.discard("")
+            methods.add(method)
+            current["retrieval_method"] = "+".join(sorted(methods))
+
+            if method == "vector":
+                current["vector_rank"] = rank
+                if "score" in result:
+                    current["vector_score"] = result["score"]
+                if "distance" in result:
+                    current["distance"] = result["distance"]
+            else:
+                current["keyword_rank"] = rank
+                current["keyword_score"] = result.get("keyword_score", result.get("score"))
+
+            current["score"] = current["hybrid_score"]
+
+        for rank, result in enumerate(vector_results, start=1):
+            add_result(result, rank, "vector", vector_weight)
+        for rank, result in enumerate(keyword_results, start=1):
+            add_result(result, rank, "keyword", keyword_weight)
+
+        return sorted(
+            merged.values(),
+            key=lambda item: float(item.get("hybrid_score") or 0.0),
+            reverse=True,
+        )[:limit]
+
+    async def search_chunks(
+        self,
+        query: str,
+        session_id: str | None = None,
+        limit: int = 5,
+        conversation_type: str | None = None,
+        min_similarity: float | None = None,
+        mode: str = "vector",
+        vector_weight: float = 0.7,
+        keyword_weight: float = 0.3,
+    ) -> list[dict[str, Any]]:
+        normalized_mode = (mode or "vector").strip().lower()
+        if normalized_mode == "keyword":
+            return await self.search_keyword_chunks(
+                query=query,
+                session_id=session_id,
+                limit=limit,
+                conversation_type=conversation_type,
+            )
+        if normalized_mode != "hybrid":
+            return await self.search_similar_chunks(
+                query=query,
+                session_id=session_id,
+                limit=limit,
+                conversation_type=conversation_type,
+                min_similarity=min_similarity,
+            )
+
+        expanded_limit = max(limit * 4, limit)
+        vector_results, keyword_results = await asyncio.gather(
+            self.search_similar_chunks(
+                query=query,
+                session_id=session_id,
+                limit=expanded_limit,
+                conversation_type=conversation_type,
+                min_similarity=min_similarity,
+            ),
+            self.search_keyword_chunks(
+                query=query,
+                session_id=session_id,
+                limit=expanded_limit,
+                conversation_type=conversation_type,
+            ),
+        )
+        return self._merge_ranked_chunks(
+            vector_results=vector_results,
+            keyword_results=keyword_results,
+            limit=limit,
+            vector_weight=vector_weight,
+            keyword_weight=keyword_weight,
+        )
+
     async def execute_safe_query(self, sql: str, embed_text: str | None = None) -> dict:
         """Execute a read-only SQL query with optional embedding injection and output truncation."""
         await self.connect()

@@ -28,7 +28,7 @@ Multi-agent orchestration over the OpenAI **Responses API** (model id hardcoded 
 2. An `asyncio.Lock` keyed by `session_id` serializes concurrent calls for the same session ([agent_runner.py:321](runner/agent_runner.py#L321)).
 3. `_load_complete_context` reads context from Redis first, falls back to Postgres `context_jsonb`, and rehydrates Redis on hit.
 4. `_chat` drives the main agent loop (up to `max_iterations=400` for the main agent): call Responses API → walk `response.output`, splitting into `function_call`s and assistant messages → execute tools in parallel via `asyncio.TaskGroup` → append outputs → loop until a final message with no pending tool calls.
-5. On the **first** user message of each turn, `_augment_user_message_with_memory` injects a block of RAG-retrieved chunks (env-tunable via `MEMORY_RETRIEVAL_LIMIT` default `5`, `MEMORY_MIN_SIMILARITY` default `0.45`). The augmented text is only placed in the *working copy* of the context — the persisted context keeps the raw user text.
+5. On the **first** user message of each turn, `_augment_user_message_with_memory` injects a block of RAG-retrieved chunks (env-tunable via `MEMORY_RETRIEVAL_LIMIT` default `5`, `MEMORY_MIN_SIMILARITY` default `0.45`, `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid` default `vector`). The augmented text is only placed in the *working copy* of the context — the persisted context keeps the raw user text.
 6. After the loop, context is persisted to both Postgres and Redis, and a **background task** re-embeds the full conversation via `MemoryRag.store_text_embeddings(replace=True)`. The task is tracked in `_background_tasks` and awaited in `AgentRunner.close()`.
 
 ### Agents as tools (key invariant)
@@ -69,7 +69,7 @@ The Responses-API context is a `dict[agent_name, list[item]]` where each item is
 
 ### Memory / RAG
 
-[tools/memoryTools/RAG_memory.py](tools/memoryTools/RAG_memory.py) wraps [tools/memoryTools/semantic_splitter.py](tools/memoryTools/semantic_splitter.py) (tiktoken `cl100k_base`, threshold-percentile splitting, `text-embedding-3-large`/3072-dim). Chunks are stored in `multiagente.conversation_chunks` with the schema documented inside the `memory_query` tool description — keep that description in sync if you change the table. `store_text_embeddings(replace=True)` wipes all chunks for a session before writing, so background sync failures leave the prior version intact only until the next successful run.
+[tools/memoryTools/RAG_memory.py](tools/memoryTools/RAG_memory.py) wraps [tools/memoryTools/semantic_splitter.py](tools/memoryTools/semantic_splitter.py) (tiktoken `cl100k_base`, threshold-percentile splitting, `text-embedding-3-large`/3072-dim). Chunks are stored in `multiagente.conversation_chunks` with the schema documented inside the `memory_query` tool description — keep that description in sync if you change the table. Text search is backed by a PostgreSQL GIN FTS index over `chunck`; `MEMORY_RETRIEVAL_MODE=hybrid` merges vector and keyword results with reciprocal rank fusion. `store_text_embeddings(replace=True)` wipes all chunks for a session before writing, so background sync failures leave the prior version intact only until the next successful run.
 
 ### Persistence model
 

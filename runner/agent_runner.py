@@ -44,6 +44,19 @@ class AgentRunner:
             return default
         return max(0, numeric)
 
+    @staticmethod
+    def _normalize_retrieval_mode(value: Any, default: str = "vector") -> str:
+        mode = str(value or "").strip().lower()
+        return mode if mode in {"vector", "keyword", "hybrid"} else default
+
+    @staticmethod
+    def _normalize_retrieval_weight(value: Any, default: float) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.0, numeric)
+
     def __init__(
         self,
         client,  # EXPECTED: openai.AsyncOpenAI
@@ -65,6 +78,17 @@ class AgentRunner:
         )
         self.memory_min_similarity = self._normalize_similarity_threshold(
             os.getenv("MEMORY_MIN_SIMILARITY", "0.55")
+        )
+        self.memory_retrieval_mode = self._normalize_retrieval_mode(
+            os.getenv("MEMORY_RETRIEVAL_MODE", "vector")
+        )
+        self.memory_vector_weight = self._normalize_retrieval_weight(
+            os.getenv("MEMORY_VECTOR_WEIGHT", "0.7"),
+            0.7,
+        )
+        self.memory_keyword_weight = self._normalize_retrieval_weight(
+            os.getenv("MEMORY_KEYWORD_WEIGHT", "0.3"),
+            0.3,
         )
         self.memory_query_max_chars = 12_000
 
@@ -355,7 +379,7 @@ class AgentRunner:
         lines = [
             "[EXTRA DE MEMORIA AUTOMATICA]",
             (
-                "Estos fragmentos vienen de la base vectorial de conversaciones y son un extra "
+                "Estos fragmentos vienen de la base de memoria de conversaciones y son un extra "
                 "potencialmente util para contextualizar la solicitud actual o decidir si conviene "
                 "hacer una busqueda de memoria mas especifica. No forman parte literal del mensaje del usuario."
             ),
@@ -369,6 +393,9 @@ class AgentRunner:
             score = chunk.get("score")
             if isinstance(score, (int, float)):
                 header += f" | score={score:.4f}"
+            method = chunk.get("retrieval_method")
+            if method:
+                header += f" | retrieval={method}"
             lines.append(header)
             lines.append(str(chunk.get("chunck", "")).strip())
 
@@ -389,10 +416,13 @@ class AgentRunner:
             return user_text
 
         try:
-            chunks = await self.memory_rag.search_similar_chunks(
+            chunks = await self.memory_rag.search_chunks(
                 query=query_text,
                 limit=self.memory_retrieval_limit,
                 min_similarity=self.memory_min_similarity,
+                mode=self.memory_retrieval_mode,
+                vector_weight=self.memory_vector_weight,
+                keyword_weight=self.memory_keyword_weight,
             )
         except Exception as exc:
             print(f"\033[1;31m  [MEMORY] Retrieval error: {exc}\033[0m")
@@ -401,14 +431,16 @@ class AgentRunner:
         if not chunks:
             print(
                 f"\033[1;35m  [MEMORY] 0 chunks para {exec_ctx.session_id} "
-                f"(k={self.memory_retrieval_limit}, min_similarity={self.memory_min_similarity:.2f})\033[0m"
+                f"(mode={self.memory_retrieval_mode}, k={self.memory_retrieval_limit}, "
+                f"min_similarity={self.memory_min_similarity:.2f})\033[0m"
             )
             return user_text
 
         print(
             f"\033[1;35m  [MEMORY] {len(chunks)} chunks recuperados para "
             f"{exec_ctx.session_id} "
-            f"(k={self.memory_retrieval_limit}, min_similarity={self.memory_min_similarity:.2f})\033[0m"
+            f"(mode={self.memory_retrieval_mode}, k={self.memory_retrieval_limit}, "
+            f"min_similarity={self.memory_min_similarity:.2f})\033[0m"
         )
         return f"{user_text}\n\n{self._format_retrieved_memory(chunks)}"
 
