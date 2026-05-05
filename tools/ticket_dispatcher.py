@@ -16,6 +16,7 @@ import signal
 import subprocess
 import time
 import traceback
+import uuid
 from difflib import SequenceMatcher
 
 from dotenv import load_dotenv
@@ -35,6 +36,8 @@ SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 TEXT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml", ".sql"}
 DEFAULT_MAX_CHARS = 200_000
 DEFAULT_SEARCH_LIMIT = 50
+DEFAULT_PLAYWRIGHT_MAX_CHARS = 12_000
+DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT = 40
 
 ALLOWED_WRITE_ROOTS = [
     os.path.expanduser("~/Downloads"),
@@ -404,6 +407,7 @@ async def action_run_command(body: dict) -> dict:
         result = subprocess.run(
             command,
             shell=True,
+            executable="/bin/bash",
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -546,17 +550,119 @@ async def action_web_fetch(body: dict) -> dict:
         return {"success": False, "error": str(e), "url": url}
 
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "si", "sí"}
+    return bool(value)
+
+
+def _truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars], True
+
+
+def _playwright_output_dir(body: dict) -> str:
+    requested = (body.get("output_dir") or "").strip()
+    base = requested or os.getenv("PLAYWRIGHT_OUTPUT_DIR") or os.path.join("/tmp", "planner_playwright")
+    output_dir = _resolve_path(base)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+async def _collect_playwright_snapshot(
+    page,
+    max_chars: int,
+    include_text: bool,
+    include_elements: bool,
+    include_html: bool,
+) -> dict:
+    snapshot: dict = {
+        "title": await page.title(),
+        "url": page.url,
+    }
+
+    if include_text:
+        text = await page.locator("body").inner_text(timeout=3000)
+        snapshot["text"], snapshot["text_truncated"] = _truncate_text(text, max_chars)
+
+    if include_elements:
+        elements = await page.evaluate(
+            """(limit) => {
+                const visibleText = (el) => (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+                const clip = (s, n = 160) => s && s.length > n ? s.slice(0, n) : s;
+                const links = Array.from(document.querySelectorAll('a[href]')).slice(0, limit).map((a) => ({
+                    text: clip(visibleText(a)),
+                    href: a.href
+                })).filter((x) => x.text || x.href);
+                const buttons = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"]')).slice(0, limit).map((b) => ({
+                    text: clip(visibleText(b)),
+                    type: b.getAttribute('type') || b.tagName.toLowerCase()
+                })).filter((x) => x.text || x.type);
+                const fields = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, limit).map((el) => ({
+                    name: el.getAttribute('name') || '',
+                    id: el.id || '',
+                    type: el.getAttribute('type') || el.tagName.toLowerCase(),
+                    placeholder: el.getAttribute('placeholder') || '',
+                    label: clip((el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('aria-label') || '')
+                }));
+                const forms = Array.from(document.querySelectorAll('form')).slice(0, limit).map((form) => ({
+                    action: form.action || '',
+                    method: form.method || 'get',
+                    fields: Array.from(form.querySelectorAll('input, textarea, select')).slice(0, 20).map((el) => el.getAttribute('name') || el.id || el.getAttribute('placeholder') || el.tagName.toLowerCase()).filter(Boolean)
+                }));
+                return {links, buttons, fields, forms};
+            }""",
+            DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT,
+        )
+        snapshot["elements"] = elements
+
+    if include_html:
+        html = await page.content()
+        snapshot["html"], snapshot["html_truncated"] = _truncate_text(html, max_chars)
+
+    return snapshot
+
+
+async def _save_playwright_screenshot(page, body: dict, full_page: bool) -> dict:
+    output_dir = _playwright_output_dir(body)
+    filename = f"playwright_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+    path = os.path.join(output_dir, filename)
+    screenshot_bytes = await page.screenshot(path=path, full_page=full_page)
+    page_size = await page.evaluate(
+        """() => ({
+            width: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
+            height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)
+        })"""
+    )
+    return {
+        "path": path,
+        "mime": "image/png",
+        "bytes": len(screenshot_bytes),
+        "full_page": full_page,
+        "viewport": page.viewport_size,
+        "page_size": page_size,
+    }
+
+
 async def action_playwright_navigate(body: dict) -> dict:
     """
     Navega y/o interactúa con una página web usando Playwright (Chromium headless).
     Requiere: url (str).
     Opcional:
-      - action: 'navigate' (default) | 'click' | 'fill' | 'screenshot' | 'get_text'
+      - action: 'navigate' (default) | 'snapshot' | 'inspect' | 'click' | 'fill' | 'screenshot' | 'get_text'
       - selector (str): selector CSS/XPath para click/fill/get_text
       - value (str): texto a introducir en fill
       - wait_for (str): selector a esperar antes de retornar
       - timeout (int, default 15, max 60): segundos
       - headless (bool, default True)
+      - max_chars (int, default 12000): máximo texto/HTML devuelto
+      - include_html/include_text/include_elements (bool): controla el snapshot
+      - screenshot_mode: 'path' (default) | 'base64' | 'both'
     """
     from playwright.async_api import async_playwright
 
@@ -571,6 +677,13 @@ async def action_playwright_navigate(body: dict) -> dict:
     timeout_s = min(int(body.get("timeout") or 15), 60)
     timeout_ms = timeout_s * 1000
     headless = body.get("headless", True)
+    max_chars = max(int(body.get("max_chars") or DEFAULT_PLAYWRIGHT_MAX_CHARS), 1)
+    include_html = _coerce_bool(body.get("include_html"), False)
+    include_text = _coerce_bool(body.get("include_text"), True)
+    include_elements = _coerce_bool(body.get("include_elements"), True)
+    screenshot_mode = (body.get("screenshot_mode") or "path").lower()
+    if screenshot_mode not in {"path", "base64", "both"}:
+        screenshot_mode = "path"
 
     try:
         async with async_playwright() as pw:
@@ -583,16 +696,23 @@ async def action_playwright_navigate(body: dict) -> dict:
 
             result: dict = {"success": True, "url": page.url, "action": action}
 
-            if action == "navigate":
-                result["title"] = await page.title()
-                result["content"] = (await page.content())[:DEFAULT_MAX_CHARS]
+            if action in {"navigate", "snapshot", "inspect"}:
+                result["snapshot"] = await _collect_playwright_snapshot(
+                    page=page,
+                    max_chars=max_chars,
+                    include_text=include_text,
+                    include_elements=include_elements,
+                    include_html=include_html,
+                )
 
             elif action == "click":
                 if not selector:
                     await browser.close()
                     return {"success": False, "error": "selector required for 'click'"}
                 await page.click(selector, timeout=timeout_ms)
-                result["title"] = await page.title()
+                result["snapshot"] = await _collect_playwright_snapshot(
+                    page, max_chars, include_text, include_elements, include_html
+                )
 
             elif action == "fill":
                 if not selector:
@@ -600,18 +720,31 @@ async def action_playwright_navigate(body: dict) -> dict:
                     return {"success": False, "error": "selector required for 'fill'"}
                 await page.fill(selector, value, timeout=timeout_ms)
                 result["filled"] = value
+                result["snapshot"] = await _collect_playwright_snapshot(
+                    page, max_chars, include_text, include_elements, include_html
+                )
 
             elif action == "get_text":
                 if not selector:
                     await browser.close()
                     return {"success": False, "error": "selector required for 'get_text'"}
                 text = await page.inner_text(selector, timeout=timeout_ms)
-                result["text"] = text
+                result["text"], result["truncated"] = _truncate_text(text, max_chars)
 
             elif action == "screenshot":
-                screenshot_bytes = await page.screenshot(full_page=True)
-                result["screenshot_base64"] = base64.b64encode(screenshot_bytes).decode("ascii")
-                result["bytes"] = len(screenshot_bytes)
+                full_page = _coerce_bool(body.get("full_page"), True)
+                screenshot = await _save_playwright_screenshot(page, body, full_page=full_page)
+                result["screenshot"] = screenshot
+                if screenshot_mode in {"base64", "both"}:
+                    with open(screenshot["path"], "rb") as f:
+                        result["screenshot_base64"] = base64.b64encode(f.read()).decode("ascii")
+                result["snapshot"] = await _collect_playwright_snapshot(
+                    page=page,
+                    max_chars=max_chars,
+                    include_text=include_text,
+                    include_elements=False,
+                    include_html=False,
+                )
 
             else:
                 await browser.close()
@@ -684,7 +817,7 @@ async def action_interpret_image(body: dict) -> dict:
     detail = body.get("detail", "auto")
     if detail not in ("low", "high", "auto"):
         detail = "auto"
-    model = body.get("model") or "gpt-5.4"
+    model = body.get("model") or "gpt-5.5"
     explicit_mime = (body.get("mime_type") or "").strip() or None
 
     try:

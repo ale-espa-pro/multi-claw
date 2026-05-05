@@ -153,7 +153,7 @@ total_tools = [
     {
         "type": "function",
         "name": "run_command",
-        "description": "Ejecuta un comando de terminal (bash/shell). Usar para: instalar paquetes (apt, pip), listar procesos, gestión de servicios, operaciones de sistema, git, docker, etc. NO usar para acciones destructivas (rm -rf /, sudo, etc.).",
+        "description": "Ejecuta un comando de terminal con Bash explícito (/bin/bash). Usar para: instalar paquetes (apt, pip), listar procesos, gestión de servicios, operaciones de sistema, git, docker, etc. NO usar para acciones destructivas (rm -rf /, sudo, etc.).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -282,7 +282,7 @@ total_tools = [
     {
         "type": "function",
         "name": "playwright_navigate",
-        "description": "Navega e interactúa con páginas web usando un navegador real (Chromium headless). Usar para páginas con JavaScript dinámico, formularios, scraping avanzado o capturas de pantalla. Para páginas estáticas o APIs usar web_fetch.",
+        "description": "Navega e interactúa con páginas web usando Chromium headless. Devuelve snapshots compactos por defecto para evitar HTML/base64 gigante en el contexto. Para páginas estáticas o APIs usar web_fetch.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -292,8 +292,8 @@ total_tools = [
                 },
                 "action": {
                     "type": "string",
-                    "description": "Acción a realizar: 'navigate' (cargar y devolver HTML), 'click' (hacer clic en un elemento), 'fill' (rellenar un campo), 'get_text' (obtener texto de un elemento), 'screenshot' (captura de pantalla en base64)",
-                    "enum": ["navigate", "click", "fill", "get_text", "screenshot"]
+                    "description": "Acción a realizar. 'navigate', 'snapshot' e 'inspect' devuelven estado compacto; 'screenshot' guarda PNG en disco por defecto.",
+                    "enum": ["navigate", "snapshot", "inspect", "click", "fill", "get_text", "screenshot"]
                 },
                 "selector": {
                     "type": "string",
@@ -314,6 +314,35 @@ total_tools = [
                 "headless": {
                     "type": "boolean",
                     "description": "Ejecutar sin interfaz gráfica (default true)"
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Máximo de caracteres para texto/HTML devuelto (default 12000)"
+                },
+                "include_html": {
+                    "type": "boolean",
+                    "description": "Incluir HTML recortado en el snapshot. Default false"
+                },
+                "include_text": {
+                    "type": "boolean",
+                    "description": "Incluir texto visible recortado en el snapshot. Default true"
+                },
+                "include_elements": {
+                    "type": "boolean",
+                    "description": "Incluir links, botones, campos y formularios principales. Default true"
+                },
+                "screenshot_mode": {
+                    "type": "string",
+                    "description": "Modo de captura: 'path' guarda PNG y devuelve ruta (default), 'base64' añade base64, 'both' devuelve ambas",
+                    "enum": ["path", "base64", "both"]
+                },
+                "full_page": {
+                    "type": "boolean",
+                    "description": "Capturar página completa en screenshot. Default true"
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Directorio donde guardar screenshots. Default /tmp/planner_playwright o PLAYWRIGHT_OUTPUT_DIR"
                 }
             }
         },
@@ -430,13 +459,13 @@ total_tools = [
     {
         "type": "function",
         "name": "WebSearchAgent",
-        "description": "Busca información en la web según objetivos solicitados",
+        "description": "Subagente dedicado a la busqueda Web especializado en busquedas generales e investigación",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Consulta web deseada"
+                    "description": "Consulta/s que se desea delegar al subagente web"
                 }
             }
         },
@@ -445,14 +474,14 @@ total_tools = [
     {
         "type": "function",
         "name": "DeviceManagerAgent",
-        "description": """Hace cualquier gestión a nivel del servidor/dispositivo: crear/leer archivos, buscar archivos,
+        "description": """Subagente encargado de Hacer cualquier gestión a nivel del servidor/dispositivo: crear/leer archivos, buscar archivos,
         ejecutar comandos de terminal, cálculos python, etc.""",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Consulta deseada"
+                    "description": "Consulta o plan deseado para el agente"
                 }
             }
         },

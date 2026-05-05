@@ -1,7 +1,9 @@
 # agent_runner.py
+import base64
 import json
 import copy
 import asyncio
+import mimetypes
 import os
 from time import time
 from typing import Any, Optional
@@ -11,6 +13,17 @@ from agents.agent_builder import AgentBuilder
 from data.conversation_store import PostgresConversationStore
 from data.redis_manager import RedisSessionManager
 from tools.memoryTools.RAG_memory import MemoryRag
+
+
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+IMAGE_EXT_TO_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
 
 
 class AgentRunner:
@@ -51,7 +64,7 @@ class AgentRunner:
             os.getenv("MEMORY_RETRIEVAL_LIMIT", "5")
         )
         self.memory_min_similarity = self._normalize_similarity_threshold(
-            os.getenv("MEMORY_MIN_SIMILARITY", "0.52")
+            os.getenv("MEMORY_MIN_SIMILARITY", "0.55")
         )
         self.memory_query_max_chars = 12_000
 
@@ -80,7 +93,7 @@ class AgentRunner:
         return None
 
     @staticmethod
-    def _normalize_message_content(content: Any, role: str) -> list[dict[str, str]]:
+    def _normalize_message_content(content: Any, role: str) -> list[dict[str, Any]]:
         if isinstance(content, str):
             text_type = "input_text" if role == "user" else "output_text"
             return [{"type": text_type, "text": content}]
@@ -88,20 +101,45 @@ class AgentRunner:
         if not isinstance(content, list):
             return []
 
-        normalized_parts: list[dict[str, str]] = []
+        normalized_parts: list[dict[str, Any]] = []
         for part in content:
             if not isinstance(part, dict):
                 continue
             part_type = part.get("type")
-            text = part.get("text")
-            if not isinstance(text, str):
-                continue
             if part_type in {"input_text", "output_text"}:
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
                 normalized_parts.append({"type": part_type, "text": text})
             elif part_type == "text":
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
                 mapped_type = "input_text" if role == "user" else "output_text"
                 normalized_parts.append({"type": mapped_type, "text": text})
+            elif part_type == "input_image":
+                normalized_image = AgentRunner._normalize_image_part(part)
+                if normalized_image is not None:
+                    normalized_parts.append(normalized_image)
         return normalized_parts
+
+    @staticmethod
+    def _normalize_image_detail(detail: Any) -> str:
+        return detail if detail in {"low", "high", "auto"} else "auto"
+
+    @staticmethod
+    def _normalize_image_part(part: dict[str, Any]) -> Optional[dict[str, Any]]:
+        detail = AgentRunner._normalize_image_detail(part.get("detail"))
+        normalized: dict[str, Any] = {"type": "input_image", "detail": detail}
+
+        for key in ("image_url", "file_id", "path", "mime_type"):
+            value = part.get(key)
+            if isinstance(value, str) and value.strip():
+                normalized[key] = value.strip()
+
+        if "image_url" not in normalized and "file_id" not in normalized and "path" not in normalized:
+            return None
+        return normalized
 
     def _normalize_context_item(self, item: Any) -> Optional[dict[str, Any]]:
         if not isinstance(item, dict):
@@ -160,6 +198,13 @@ class AgentRunner:
                     text = self._extract_message_text(item)
                     if text:
                         lines.append(f"[{agent_name}] {role}: {text}")
+                    image_count = sum(
+                        1
+                        for part in item.get("content", [])
+                        if isinstance(part, dict) and part.get("type") == "input_image"
+                    )
+                    if image_count:
+                        lines.append(f"[{agent_name}] {role}: [{image_count} imagen(es) adjunta(s)]")
                 elif item_type == "function_call":
                     lines.append(
                         f"[{agent_name}] function_call {item.get('name', '')}: {item.get('arguments', '')}"
@@ -181,12 +226,124 @@ class AgentRunner:
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     @staticmethod
-    def _build_user_message_item(text: str) -> dict[str, Any]:
+    def _image_input_to_part(image: dict[str, Any]) -> dict[str, Any] | None:
+        if not isinstance(image, dict):
+            return None
+
+        detail = AgentRunner._normalize_image_detail(image.get("detail"))
+        mime_type = (image.get("mime_type") or "").strip() or None
+
+        file_id = (image.get("file_id") or "").strip()
+        if file_id:
+            return {"type": "input_image", "file_id": file_id, "detail": detail}
+
+        url = (image.get("url") or "").strip()
+        if url:
+            return {"type": "input_image", "image_url": url, "detail": detail}
+
+        data_url = (image.get("data_url") or "").strip()
+        if data_url:
+            return {"type": "input_image", "image_url": data_url, "detail": detail}
+
+        path = (image.get("path") or "").strip()
+        if path:
+            part = {"type": "input_image", "path": path, "detail": detail}
+            if mime_type:
+                part["mime_type"] = mime_type
+            return part
+
+        raw_base64 = (image.get("base64") or "").strip()
+        if raw_base64:
+            compact_base64 = "".join(raw_base64.split())
+            decoded = base64.b64decode(compact_base64, validate=True)
+            if len(decoded) > MAX_IMAGE_BYTES:
+                raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes: {len(decoded)}")
+            mime = mime_type or "image/png"
+            return {
+                "type": "input_image",
+                "image_url": f"data:{mime};base64,{compact_base64}",
+                "detail": detail,
+            }
+
+        return None
+
+    @staticmethod
+    def _build_user_message_item(text: str, images: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": text}]
+        for image in images or []:
+            try:
+                image_part = AgentRunner._image_input_to_part(image)
+            except Exception as exc:
+                content.append({"type": "input_text", "text": f"[imagen omitida: {exc}]"})
+                continue
+            if image_part is not None:
+                content.append(image_part)
         return {
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": text}],
+            "content": content,
         }
+
+    @staticmethod
+    def _with_replaced_message_text(message_item: dict[str, Any], text: str) -> dict[str, Any]:
+        item = copy.deepcopy(message_item)
+        replaced = False
+        for part in item.get("content", []):
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "input_text":
+                part["text"] = text
+                replaced = True
+                break
+        if not replaced:
+            item.setdefault("content", []).insert(0, {"type": "input_text", "text": text})
+        return item
+
+    @staticmethod
+    def _resolve_local_image_part(part: dict[str, Any]) -> dict[str, Any]:
+        if "path" not in part:
+            return part
+
+        path = os.path.realpath(os.path.expandvars(os.path.expanduser(part["path"])))
+        if not os.path.isfile(path):
+            raise ValueError(f"image file not found: {path}")
+
+        size = os.path.getsize(path)
+        if size > MAX_IMAGE_BYTES:
+            raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes: {size}")
+
+        ext = os.path.splitext(path)[1].lower()
+        mime = part.get("mime_type") or IMAGE_EXT_TO_MIME.get(ext) or mimetypes.guess_type(path)[0] or "image/png"
+        with open(path, "rb") as f:
+            image_url = f"data:{mime};base64,{base64.b64encode(f.read()).decode('ascii')}"
+
+        api_part = {"type": "input_image", "image_url": image_url, "detail": part.get("detail", "auto")}
+        return api_part
+
+    @classmethod
+    def _prepare_context_for_api(cls, context: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for item in context:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                prepared.append(item)
+                continue
+
+            api_item = copy.deepcopy(item)
+            api_content = []
+            for part in api_item.get("content", []):
+                if isinstance(part, dict) and part.get("type") == "input_image":
+                    try:
+                        api_content.append(cls._resolve_local_image_part(part))
+                    except Exception as exc:
+                        api_content.append({
+                            "type": "input_text",
+                            "text": f"[imagen no disponible para enviar al modelo: {exc}]",
+                        })
+                else:
+                    api_content.append(part)
+            api_item["content"] = api_content
+            prepared.append(api_item)
+        return prepared
 
     def _prepare_memory_query(self, text: str) -> str:
         compact = " ".join(text.split())
@@ -340,6 +497,7 @@ class AgentRunner:
         user_input: str,
         agent_name: str | None = None,
         conversation_type: str | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> str:
         agent_name = agent_name or self.main_agent
         session_lock = await self._get_session_lock(session_id)
@@ -349,7 +507,7 @@ class AgentRunner:
             try:
                 exec_ctx.context = await self._load_complete_context(session_id)
 
-                response = await self._chat(user_input, agent_name, exec_ctx)
+                response = await self._chat(user_input, agent_name, exec_ctx, images=images)
 
                 await self._persist_complete_context(
                     session_id=session_id,
@@ -382,6 +540,7 @@ class AgentRunner:
         user_input: str,
         agent_name: str | None = None,
         conversation_type: str | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> dict:
         agent_name = agent_name or self.main_agent
         session_lock = await self._get_session_lock(session_id)
@@ -391,7 +550,7 @@ class AgentRunner:
             try:
                 exec_ctx.context = await self._load_complete_context(session_id)
 
-                response = await self._chat(user_input, agent_name, exec_ctx)
+                response = await self._chat(user_input, agent_name, exec_ctx, images=images)
 
                 await self._persist_complete_context(
                     session_id=session_id,
@@ -423,7 +582,7 @@ class AgentRunner:
         system_prompt = self.agent_builder.build_system_prompt(
             agent_name, exec_ctx.session_id, exec_ctx.conversation_type
         )
-        messages = [{"role": "system", "content": system_prompt}] + curr_context
+        messages = [{"role": "system", "content": system_prompt}] + self._prepare_context_for_api(curr_context)
         kwargs: dict[str, Any] = {}
 
         if agent_name in ["web_search_agent", "ResearchAgent", "WebSearchAgent"]:
@@ -546,13 +705,21 @@ class AgentRunner:
 
         return f"[{agent_name}] Máximo de iteraciones alcanzado"
 
-    async def _chat(self, user_input: str, agent_name: str, exec_ctx: "ExecutionContext"):
-        exec_ctx.context[agent_name].append(self._build_user_message_item(user_input))
+    async def _chat(
+        self,
+        user_input: str,
+        agent_name: str,
+        exec_ctx: "ExecutionContext",
+        images: list[dict[str, Any]] | None = None,
+    ):
+        user_message = self._build_user_message_item(user_input, images=images)
+        exec_ctx.context[agent_name].append(user_message)
 
         self._truncate_context_if_needed(agent_name, exec_ctx)
         working_context = copy.deepcopy(exec_ctx.context[agent_name])
-        working_context[-1] = self._build_user_message_item(
-            await self._augment_user_message_with_memory(user_input, exec_ctx)
+        working_context[-1] = self._with_replaced_message_text(
+            working_context[-1],
+            await self._augment_user_message_with_memory(user_input, exec_ctx),
         )
 
         for _ in range(self.max_iterations):

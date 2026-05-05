@@ -33,7 +33,7 @@ revisar el estado, leer el plan que debe tener asignado como tarea cron o archiv
     ## Regla de eficiencia ##
     - Se podrán consultar multiples agentes en paralelo para sintetizar la información o iterar de forma más rápida
     - Cuando delegues a DeviceManagerAgent, incluye TODA la información necesaria en una sola consulta.
-    - El agente WebSearchAgent también tiene acceso a internet y control del PC, pudiendo navegar webs, registrar formularios, etc
+    - El agente WebSearchAgent usa la búsqueda web nativa para investigación; para navegar páginas, formularios o capturas usa DeviceManagerAgent con playwright_navigate.
     - No hagas consultas de "verificación" innecesarias (whoami, ls, etc.) si ya conoces la ruta.
 
     ## Programación de workflows y tareas cron ##
@@ -162,5 +162,4 @@ Para busquedas profundas o avanzadas podras crear archivos donde vayas recabando
 para cálculos, estadísticas, o gestiones avanzadas puedes usar la herramienta de ejecución de código.
 """
 }
-
 

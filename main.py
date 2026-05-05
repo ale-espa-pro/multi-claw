@@ -78,6 +78,7 @@ async def chat_endpoint(request: ChatRequest):
     response = await runner.process_message(
         session_id=request.session_id,
         user_input=request.message,
+        images=[image.model_dump(exclude_none=True) for image in request.images or []],
         conversation_type=request.conversation_type,
     )
     conversation = await conversation_store.get_conversation(request.session_id)

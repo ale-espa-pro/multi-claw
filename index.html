@@ -291,6 +291,20 @@
             border-top: 1px solid var(--border);
             margin: .8em 0;
         }
+        .msg-images {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .msg-image {
+            width: 112px;
+            height: 84px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            object-fit: cover;
+            background: #111;
+        }
 
         .code-block {
             margin: .8em 0;
@@ -357,6 +371,42 @@
             transition: border-color .15s;
         }
         .composer:focus-within { border-color: #444; }
+        .attach-preview {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 10px 10px 0;
+        }
+        .attach-item {
+            position: relative;
+            width: 74px;
+            height: 58px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            background: #111;
+        }
+        .attach-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .attach-remove {
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            width: 20px;
+            height: 20px;
+            border-radius: 999px;
+            background: rgba(0, 0, 0, .68);
+            color: #fff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: .8rem;
+            line-height: 1;
+        }
         .composer textarea {
             width: 100%;
             min-height: 44px;
@@ -374,10 +424,31 @@
             align-items: center;
             justify-content: space-between;
             padding: 0 8px 8px 14px;
+            gap: 10px;
         }
+        .composer-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .attach-btn {
+            width: 34px; height: 34px;
+            border-radius: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-secondary);
+            transition: background .15s, color .15s;
+        }
+        .attach-btn:hover { background: var(--surface-hover); color: var(--text); }
+        .attach-btn:disabled { opacity: .35; cursor: default; }
         .composer-hint {
             font-size: .65rem;
             color: var(--text-tertiary);
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .send-btn {
             width: 34px; height: 34px;
@@ -494,6 +565,15 @@
                                     <div class="msg-time">{{ m.meta }}</div>
                                 </div>
                                 <div class="msg-body" v-html="m.role === 'assistant' ? renderMarkdown(m.content) : renderPlain(m.content)"></div>
+                                <div v-if="m.images?.length" class="msg-images">
+                                    <img
+                                        v-for="img in m.images"
+                                        :key="img.id"
+                                        class="msg-image"
+                                        :src="img.preview"
+                                        :alt="img.name || 'Imagen adjunta'"
+                                    >
+                                </div>
                             </div>
                         </article>
 
@@ -513,6 +593,12 @@
 
             <footer class="composer-wrap">
                 <div class="composer">
+                    <div v-if="attachments.length" class="attach-preview">
+                        <div v-for="img in attachments" :key="img.id" class="attach-item">
+                            <img :src="img.preview" :alt="img.name">
+                            <button class="attach-remove" @click="removeAttachment(img.id)" :title="`Quitar ${img.name}`">×</button>
+                        </div>
+                    </div>
                     <textarea
                         ref="composerInput"
                         v-model="draft"
@@ -522,9 +608,22 @@
                     ></textarea>
                     <div class="composer-bottom">
                         <div class="composer-hint">{{ footerStatus }}</div>
-                        <button class="send-btn" :disabled="!canSend" @click="sendMessage">
-                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12-2 2V6l14-3-3 14-5-5"/><path d="m5 12 5-5"/></svg>
-                        </button>
+                        <div class="composer-actions">
+                            <input
+                                ref="imageInput"
+                                type="file"
+                                accept="image/*"
+                                multiple
+                                hidden
+                                @change="handleImageFiles"
+                            >
+                            <button class="attach-btn" :disabled="sending" @click="openImagePicker" title="Adjuntar imágenes">
+                                <svg width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8.5 8 14a4 4 0 0 1-5.66-5.66l6.2-6.2a2.75 2.75 0 0 1 3.89 3.89l-6.2 6.2a1.5 1.5 0 1 1-2.12-2.12l5.66-5.66"/></svg>
+                            </button>
+                            <button class="send-btn" :disabled="!canSend" @click="sendMessage">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12-2 2V6l14-3-3 14-5-5"/><path d="m5 12 5-5"/></svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </footer>
@@ -536,6 +635,7 @@
 <script>
 const { createApp, nextTick } = Vue;
 const genId = () => `sess_${Math.random().toString(36).slice(2, 11)}`;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 createApp({
     data() {
@@ -549,6 +649,7 @@ createApp({
             conversations: [],
             messages: [],
             draft: "",
+            attachments: [],
             typing: false,
             sidebarOpen: false,
             isMobile: window.innerWidth <= 1080,
@@ -566,6 +667,8 @@ createApp({
         footerStatus() {
             if (this.sending) return "Generando respuesta…";
             if (this.loadingConversation) return "Cargando…";
+            if (this.attachments.length === 1) return "1 imagen lista";
+            if (this.attachments.length > 1) return `${this.attachments.length} imágenes listas`;
             return "Enter enviar · Shift+Enter salto";
         },
         visibleConversations() {
@@ -581,10 +684,11 @@ createApp({
             return this.messages.map((m, i) => ({
                 ...m,
                 localId: m.id || `${m.role}-${i}`,
-                meta: this.fmtTime(m.created_at)
+                meta: this.fmtTime(m.created_at),
+                images: m.images || this.imagesFromMessage(m)
             }));
         },
-        canSend() { return !this.sending && !!this.draft.trim(); }
+        canSend() { return !this.sending && (!!this.draft.trim() || this.attachments.length > 0); }
     },
     mounted() {
         this.restoreLayout();
@@ -614,6 +718,60 @@ createApp({
         compact(v) { return String(v || "").replace(/\s+/g, " ").trim(); },
         esc(v) { return String(v || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); },
         renderPlain(v) { return `<p>${this.esc(v).replace(/\n/g, "<br>")}</p>`; },
+        imagesFromMessage(message) {
+            const parts = message?.data?.content;
+            if (!Array.isArray(parts)) return [];
+            return parts
+                .filter(p => p?.type === "input_image" && typeof p.image_url === "string" && p.image_url)
+                .map((p, i) => ({
+                    id: `${message.id || "msg"}-img-${i}`,
+                    name: "Imagen adjunta",
+                    preview: p.image_url
+                }));
+        },
+        fileToDataUrl(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(reader.error || new Error("No se pudo leer la imagen"));
+                reader.readAsDataURL(file);
+            });
+        },
+        openImagePicker() {
+            if (this.sending) return;
+            this.$refs.imageInput?.click();
+        },
+        async handleImageFiles(event) {
+            const files = Array.from(event.target.files || []);
+            event.target.value = "";
+            const next = [];
+            for (const file of files) {
+                if (!file.type.startsWith("image/")) continue;
+                if (file.size > MAX_IMAGE_BYTES) {
+                    this.messages.push({
+                        role: "assistant",
+                        content: `${file.name} supera el límite de 20 MB.`,
+                        created_at: new Date().toISOString()
+                    });
+                    continue;
+                }
+                const dataUrl = await this.fileToDataUrl(file);
+                next.push({
+                    id: `img_${Math.random().toString(36).slice(2, 10)}`,
+                    name: file.name,
+                    mime_type: file.type || "image/png",
+                    size: file.size,
+                    data_url: dataUrl,
+                    preview: dataUrl,
+                    detail: "auto"
+                });
+            }
+            this.attachments = [...this.attachments, ...next];
+            await this.scroll(true);
+        },
+        removeAttachment(id) {
+            this.attachments = this.attachments.filter(img => img.id !== id);
+        },
         renderInline(v) {
             return v
                 .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -720,6 +878,7 @@ createApp({
         startNewConversation() {
             this.config.sessionId = genId();
             this.messages = [];
+            this.attachments = [];
             this.save();
             this.closeSidebar();
             nextTick(() => this.$refs.composerInput?.focus());
@@ -732,9 +891,26 @@ createApp({
         },
         async sendMessage() {
             const text = this.draft.trim();
-            if (!text || this.sending) return;
-            this.messages.push({ role: "user", content: text, created_at: new Date().toISOString() });
+            const images = this.attachments.map(img => ({
+                data_url: img.data_url,
+                mime_type: img.mime_type,
+                detail: img.detail
+            }));
+            const previews = this.attachments.map(img => ({
+                id: img.id,
+                name: img.name,
+                preview: img.preview
+            }));
+            if ((!text && !images.length) || this.sending) return;
+            const messageText = text || "Analiza la imagen adjunta.";
+            this.messages.push({
+                role: "user",
+                content: messageText,
+                images: previews,
+                created_at: new Date().toISOString()
+            });
             this.draft = "";
+            this.attachments = [];
             this.sending = true;
             this.typing = true;
             this.autoResize();
@@ -745,7 +921,8 @@ createApp({
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         session_id: this.config.sessionId,
-                        message: text,
+                        message: messageText,
+                        images,
                         username: this.config.username || undefined,
                         metadata: (() => { try { const p = JSON.parse(this.config.metadata || "{}"); return typeof p === "object" && p ? p : {}; } catch { return {}; } })()
                     })

@@ -2,9 +2,20 @@ from typing import Any
 from pydantic import BaseModel
 
 
+class ChatImage(BaseModel):
+    url: str | None = None
+    path: str | None = None
+    data_url: str | None = None
+    file_id: str | None = None
+    base64: str | None = None
+    mime_type: str | None = None
+    detail: str | None = None
+
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str
+    images: list[ChatImage] | None = None
     username: str | None = None
     metadata: dict[str, Any] | None = None
     conversation_type: str | None = None  # (None, cron, temporal)

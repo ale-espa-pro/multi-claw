@@ -20,7 +20,7 @@ External services used at startup:
 
 ## Architecture
 
-Multi-agent orchestration over the OpenAI **Responses API** (model id hardcoded as `gpt-5.4` in [runner/agent_runner.py:441](runner/agent_runner.py#L441)). Entry point is [main.py](main.py); the brains are in [runner/agent_runner.py](runner/agent_runner.py) and [agents/agent_builder.py](agents/agent_builder.py).
+Multi-agent orchestration over the OpenAI **Responses API** (model id hardcoded as `gpt-5.5` in [runner/agent_runner.py](runner/agent_runner.py)). Entry point is [main.py](main.py); the brains are in [runner/agent_runner.py](runner/agent_runner.py) and [agents/agent_builder.py](agents/agent_builder.py).
 
 ### Request flow
 
@@ -36,8 +36,8 @@ Multi-agent orchestration over the OpenAI **Responses API** (model id hardcoded 
 Each agent is a dict of `{base_prompt, tools, json_response}` registered from [agents/agent_config.json](agents/agent_config.json). An agent listed in another agent's `tools` array becomes a **callable sub-agent**: when the parent emits a `function_call` whose name matches an `agent_name`, `_execute_tool` dispatches to `_run_subagent` instead of the tool dispatcher ([agent_runner.py:460](runner/agent_runner.py#L460)). Sub-agent context lives in its own slot of the per-session context dict and runs up to 10 iterations.
 
 Current wiring (see `agent_config.json`):
-- **ExecutorAgent** (main) → WebSearchAgent, DeviceManagerAgent, save_preference, read_file, memory_query.
-- **WebSearchAgent** → web_search (OpenAI native), playwright_navigate, web_fetch, memory_query. Hardcoded override in `_request_agent` swaps its tool list for `[{"type": "web_search"}]` regardless of config.
+- **ExecutorAgent** (main) → WebSearchAgent, DeviceManagerAgent, save_preference, read_file, memory_query, interpret_image.
+- **WebSearchAgent** → web_search (OpenAI native). Hardcoded override in `_request_agent` swaps its tool list for `[{"type": "web_search"}]` regardless of config.
 - **DeviceManagerAgent** → file ops, run_python, search_files, run_command, WebSearchAgent (recursive), memory_query, browsing tools, interpret_image (vision).
 - **CronosAgent** → memory_query only (prompt/tools intentionally minimal).
 - Non-`WebSearchAgent` agents use `parallel_tool_calls=False` by default, except when `json_response=true` (where parallel calls are re-enabled and `text.format = json_object` is requested).
@@ -58,10 +58,12 @@ Tools are forwarded their args as a single `body: dict`. Agents that appear in `
 - `action_memory_query` routes through `MemoryRag.execute_safe_query`, which enforces SELECT/WITH/EXPLAIN only and strips DDL/DML keywords. It also supports a `$EMBEDDING$` placeholder that is substituted with the vector literal of `embed_text` before execution.
 - `action_read_file` treats unknown extensions as binary and returns metadata only (`preview_omitted: true`) — no base64 preview is ever returned inline. Text extensions recognized: `.txt .md .py .json .csv .log .yaml .yml .sql`.
 - `action_interpret_image` accepts a local path, http(s) URL, data URI, or raw base64 string; caps at 20 MB; proxies the image to the Responses API as `input_image` for vision analysis. Local paths go through `_resolve_path` — they are not restricted to `ALLOWED_WRITE_ROOTS` (read-only).
+- `ChatRequest.images` can pass images directly to the main Responses call as `input_image` parts (`url`, `path`, `data_url`, `file_id`, or base64). Local paths are resolved into data URLs only when preparing the API request.
+- `playwright_navigate` returns compact page snapshots by default. Screenshots are saved as PNG files and return file metadata/path unless `screenshot_mode` explicitly requests base64.
 
 ### Context shape & normalization
 
-The Responses-API context is a `dict[agent_name, list[item]]` where each item is one of `{type: "message", role, content: [{type, text}]}`, `{type: "function_call", call_id, name, arguments}`, or `{type: "function_call_output", call_id, output}`. Role→type mapping: `user` messages get `input_text` parts, assistant messages get `output_text`. `_normalize_context_item` drops anything that doesn't fit this schema — if you add new item types (reasoning blocks, images, etc.), extend that method or they will be silently filtered on load/save.
+The Responses-API context is a `dict[agent_name, list[item]]` where each item is one of `{type: "message", role, content: [...]}`, `{type: "function_call", call_id, name, arguments}`, or `{type: "function_call_output", call_id, output}`. Role→type mapping: `user` messages get `input_text` and optional `input_image` parts, assistant messages get `output_text`. `_normalize_context_item` drops anything that doesn't fit this schema — if you add new item types (reasoning blocks, computer calls, etc.), extend that method or they will be silently filtered on load/save.
 
 `_truncate_context_if_needed` resets an agent's context when user-message count exceeds `max_messages=120`, keeping the last `keep_after_reset=10` user messages and everything after them. (Sub-agents still cap at `max_iterations=10` per invocation.)
 

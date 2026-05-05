@@ -231,3 +231,13 @@ multi-claw/
 Construido sobre OpenClaw · Versión personal con memoria mejorada
 
 </div>
+=======
+# multi-claw
+Versión personal openclaw multiagente memoria mejorada
+
+## Multimodal input
+
+`POST /chat` accepts optional `images` in addition to `message`. Each image can be provided as `url`, `path`, `data_url`, `file_id`, or raw `base64` with optional `mime_type` and `detail` (`low`, `high`, `auto`). Images are passed to the main Responses API call as `input_image` parts so the main agent can interpret them directly.
+
+`playwright_navigate` returns compact snapshots by default. Screenshots are saved to disk and return metadata/path unless `screenshot_mode` explicitly requests base64.
+>>>>>>> 52dded7 (test added and minor changes)

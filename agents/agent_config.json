@@ -1,15 +1,15 @@
 {
     "ExecutorAgent": {
-        "tools": ["WebSearchAgent", "DeviceManagerAgent", "save_preference","read_file", "memory_query"],
+        "tools": ["WebSearchAgent", "DeviceManagerAgent", "save_preference", "read_file", "memory_query", "interpret_image"],
         "main": true,
         "json_response": false
     },
     "WebSearchAgent": {
-        "tools": ["web_search", "playwright_navigate", "web_fetch", "memory_query"],
+        "tools": [],
         "json_response": true
     },
     "DeviceManagerAgent": {
-        "tools": ["read_file", "run_python", "search_files", "run_command", "write_file", "edit_file", "WebSearchAgent", "memory_query", "playwright_navigate", "web_fetch", "interpret_image"],
+        "tools": ["read_file", "run_python", "run_command", "write_file", "edit_file", "WebSearchAgent", "memory_query", "playwright_navigate", "web_fetch", "interpret_image"],
         "json_response": true
     },
     "CronosAgent": {
