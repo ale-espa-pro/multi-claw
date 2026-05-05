@@ -1,5 +1,5 @@
 # main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
@@ -44,6 +44,13 @@ runner = AgentRunner(
     memory_rag=memory_rag,
 )
 
+CHAT_API_KEY = os.getenv("CHAT_API_KEY")
+
+
+def _require_api_key(x_api_key: str | None):
+    if CHAT_API_KEY and x_api_key != CHAT_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
 # ── Twilio ──
 set_agent_runner(runner)
 app.include_router(twilio_router)
@@ -68,7 +75,8 @@ async def serve_index():
 
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, x_api_key: str | None = Header(default=None)):
+    _require_api_key(x_api_key)
     await conversation_store.ensure_conversation(
         session_id=request.session_id,
         username=request.username,
@@ -87,13 +95,15 @@ async def chat_endpoint(request: ChatRequest):
 
 
 @app.get("/conversations", response_model=list[ConversationSummary])
-async def list_conversations(limit: int = 50):
+async def list_conversations(limit: int = 50, x_api_key: str | None = Header(default=None)):
+    _require_api_key(x_api_key)
     conversations = await conversation_store.list_conversations(limit=limit)
     return [serialize_conversation_summary(row) for row in conversations]
 
 
 @app.get("/conversations/{session_id}", response_model=ConversationDetail)
-async def get_conversation(session_id: str):
+async def get_conversation(session_id: str, x_api_key: str | None = Header(default=None)):
+    _require_api_key(x_api_key)
     conversation = await conversation_store.get_conversation(session_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -101,12 +111,14 @@ async def get_conversation(session_id: str):
 
 
 @app.delete("/session/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, x_api_key: str | None = Header(default=None)):
+    _require_api_key(x_api_key)
     await runner.delete_session(session_id)
     return {"status": "deleted"}
 
 
 @app.delete("/conversations/{session_id}")
-async def delete_conversation(session_id: str):
+async def delete_conversation(session_id: str, x_api_key: str | None = Header(default=None)):
+    _require_api_key(x_api_key)
     await runner.delete_session(session_id)
     return {"status": "deleted"}

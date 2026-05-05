@@ -1,244 +1,288 @@
-<div align="center">
+# Multi-Claw
 
-# 🦾 Multi-Claw
+Multi-Claw es un backend experimental de orquestacion multiagente con FastAPI, OpenAI Responses API, memoria persistente en PostgreSQL y cache de contexto en Redis.
 
-**Sistema multi-agente autónomo con memoria semántica persistente**
+El proyecto esta orientado a uso personal/local, pero ya incluye piezas para funcionar como servicio: API HTTP, UI HTML simple, webhook de Twilio/WhatsApp, herramientas locales de archivos/comandos, memoria semantica por embeddings y busqueda textual.
 
-[![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--5-412991?style=flat-square&logo=openai&logoColor=white)](https://openai.com)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Async-336791?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org)
-[![Redis](https://img.shields.io/badge/Redis-Sessions-DC382D?style=flat-square&logo=redis&logoColor=white)](https://redis.io)
-[![License](https://img.shields.io/badge/License-Personal-orange?style=flat-square)](#)
+## Estado Real
 
-</div>
+Este repositorio no es todavia un producto empaquetado. Estas son las realidades importantes:
 
----
-
-## ¿Qué es Multi-Claw?
-
-Multi-Claw es un framework de orquestación de agentes IA diseñado para ejecutar tareas complejas de forma autónoma. Varios agentes especializados colaboran entre sí, comparten contexto y mantienen memoria persistente entre sesiones usando embeddings semánticos y PostgreSQL.
-
-> Fork personal de openclaw con arquitectura de memoria mejorada, soporte para WhatsApp/Twilio, ejecución paralela de herramientas y más de 50 herramientas nativas.
-
----
+- Requiere `OPENAI_API_KEY` para ejecutar agentes y generar embeddings.
+- Requiere PostgreSQL para persistencia de conversaciones.
+- Redis se usa como cache de contexto y para rate limits/idempotencia de Twilio cuando esta disponible.
+- La busqueda vectorial usa `pgvector` si la extension esta disponible; si no, los embeddings se guardan como JSONB y no hay busqueda vectorial.
+- No se usa Qdrant en runtime.
+- Twilio es opcional, pero el router esta incluido en la app.
+- El sandbox de `run_python` usa APIs Linux (`resource`, `prctl`), asi que esta pensado para Linux/WSL/Docker.
+- Algunas rutas y prompts siguen siendo personales y deberian moverse a configuracion antes de un despliegue multiusuario.
 
 ## Arquitectura
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        Web UI / API                         │
-│                    FastAPI  ·  WebSocket                    │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                     ExecutorAgent  (main)                   │
-│         Orquesta, delega y coordina sub-agentes             │
-└───┬──────────┬──────────┬──────────┬──────────┬────────────┘
-    │          │          │          │          │
-    ▼          ▼          ▼          ▼          ▼
- WebSearch  DeviceMgr  Cronos    MCPMgr    Planner
-  Agent      Agent     Agent     Agent     Agent
-  (web)    (sistema)  (memoria) (MCP)    (planning)
-    │          │          │          │          │
-    └──────────┴──────────┴──────────┴──────────┘
-                           │
-         ┌─────────────────┼─────────────────┐
-         ▼                 ▼                 ▼
-    PostgreSQL           Redis           Qdrant
-  (contexto+chunks)   (sesiones)    (RAG opcional)
-         │
-         ▼
-  Embeddings OpenAI
-  text-embedding-3-large
-  halfvec(3072) dims
+```text
+FastAPI / index.html
+        |
+        v
+AgentRunner
+        |
+        +-- ExecutorAgent
+        +-- DeviceManagerAgent
+        +-- WebSearchAgent
+        +-- CronosAgent
+        |
+        +-- tools/local_tools.py schemas
+        +-- tools/ticket_dispatcher.py implementations
+        |
+        +-- PostgreSQL: conversaciones + chunks + embeddings
+        +-- Redis: cache de contexto + rate limit Twilio
+        +-- OpenAI: Responses API + embeddings
 ```
 
----
+## Funcionalidad Principal
 
-## Agentes
+- Orquestacion multiagente con agentes configurados en `agents/agent_config.json`.
+- Herramientas locales para leer, escribir, editar y buscar archivos.
+- Hash `md5` de archivos devuelto por `read_file`, `write_file`, `edit_file` y `file_hash`.
+- Ejecucion de comandos con bloqueos basicos de seguridad.
+- Sandbox Python limitado para calculos y logica pura.
+- Lectura de TXT, Markdown, JSON, CSV, PDF, DOCX, XLSX y PPTX.
+- Navegacion web con Playwright.
+- Webhook Twilio/WhatsApp con validacion de firma, allowlist, rate limit e idempotencia.
+- Memoria conversacional persistente:
+  - chunks semanticos con `text-embedding-3-large`
+  - almacenamiento en PostgreSQL
+  - busqueda vectorial con pgvector/HNSW cuando esta disponible
+  - busqueda textual PostgreSQL FTS
+  - modo hibrido por Reciprocal Rank Fusion
 
-| Agente | Rol | Herramientas clave |
-|---|---|---|
-| **ExecutorAgent** | Orquestador principal | Todos los sub-agentes |
-| **WebSearchAgent** | Búsqueda y navegación web | `web_fetch`, `playwright_navigate` |
-| **DeviceManagerAgent** | Control del sistema | `run_command`, `read_file`, `write_file`, `run_python`|
-| **PlannerAgent** | Planificación de tareas | Descomposición de objetivos (DESACTIVADO EN MODELOS RAZONADORES/INNECESARIO)
+## Variables De Entorno
 
----
-
-## Características principales
-
-### 🧠 Memoria semántica persistente
-- Conversaciones divididas en chunks semánticos con embeddings OpenAI
-- Búsqueda por similitud vectorial sobre el historial completo
-- Búsqueda textual FTS/BM25-like opcional y modo híbrido con fusión de rankings
-- Sincronización en background sin bloquear la respuesta
-
-### ⚡ Ejecución paralela de herramientas
-- Los agentes pueden ejecutar múltiples herramientas simultáneamente
-- Arquitectura async/await de extremo a extremo
-- Bloqueo de sesión para escenarios multi-usuario
-
-### 🗄️ Persistencia dual
-- **PostgreSQL**: snapshots completos del contexto en JSONB + embeddings halfvec
-- **Redis**: caché de sesión para acceso rápido
-
-### 📲 Integración WhatsApp / Twilio
-- Webhook listo para recibir mensajes de WhatsApp
-- Respuestas automáticas vía Twilio API
-
-### 📊 Token tracking con caché de prompts
-- Monitoreo en tiempo real: tokens de entrada, salida y cacheados
-- Cálculo automático del cache hit rate
-- Reportes de uso por sesión
-
-### 🔒 Seguridad incorporada
-- Comandos bloqueados configurables
-- Ejecución Python en sandbox (En progreso)
-- SQL de solo lectura para agentes
-- Validación estricta con Pydantic
-
----
-
-## Tipos de conversación
-
-| Tipo | Descripción | Persistencia |
-|---|---|---|
-| `normal` | Conversación estándar con historial completo | ✅ PostgreSQL + Redis |
-| `cron` | Tarea programada automática | ✅ PostgreSQL |
-| `workflow` | Procedimiento multi-paso reutilizable | ✅ PostgreSQL |
-
----
-
-## Stack tecnológico
-
-```
-Backend    FastAPI · Python 3.8+ · asyncio
-IA         OpenAI GPT-5-5.5 · text-embedding-3-large
-DB         PostgreSQL (psycopg async) · Redis
-Vector     pgvector halfvec(3072) · Qdrant (opcional)
-Frontend   Vanilla JS · HTML/CSS dark theme
-Mensajería Twilio · WhatsApp Business API
-Browser    Playwright (automatización web)
-```
-
----
-
-## Configuración rápida
-
-### 1. Variables de entorno (`.env`)
+Minimas:
 
 ```env
-# OpenAI
 OPENAI_API_KEY=sk-...
 
-# PostgreSQL
 MULTIAGENT_PG_HOST=localhost
 MULTIAGENT_PG_PORT=5432
 MULTIAGENT_PG_DB=multiagente
-MULTIAGENT_PG_USER=user
-MULTIAGENT_PG_PASSWORD=password
+MULTIAGENT_PG_USER=admin
+MULTIAGENT_PG_PASSWORD=change-me
+MULTIAGENT_PG_SCHEMA=multiagente
 
-# Redis
 REDIS_URL=redis://localhost:6379
-
-# Twilio (opcional)
-TWILIO_ACCOUNT_SID=AC...
-TWILIO_AUTH_TOKEN=...
-
-# Usuario
-USER_NAME=nombre
-USER_PHONE=+34...
-USER_EMAIL=email@dominio.com
+WORKING_PATH=/tmp/planner
 ```
 
-### 2. Instalación
+Opcionales utiles:
+
+```env
+# API HTTP: si se define, /chat y endpoints de conversaciones requieren X-API-Key
+CHAT_API_KEY=change-me
+
+# Modelos/memoria
+MEMORY_RETRIEVAL_LIMIT=5
+MEMORY_MIN_SIMILARITY=0.55
+MEMORY_RETRIEVAL_MODE=vector   # vector | keyword | hybrid
+MEMORY_VECTOR_WEIGHT=0.7
+MEMORY_KEYWORD_WEIGHT=0.3
+
+# Twilio/WhatsApp
+PUBLIC_BASE_URL=https://tu-dominio-o-ngrok
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_VALIDATE_SIGNATURE=true
+TWILIO_ALLOWED_FROM=whatsapp:+34123456789
+TWILIO_RATE_LIMIT_PER_MINUTE=10
+TWILIO_RATE_LIMIT_PER_DAY=100
+TWILIO_GLOBAL_RATE_LIMIT_PER_MINUTE=30
+TWILIO_MAX_INBOUND_WORDS=1000
+TWILIO_MAX_REPLY_WORDS=250
+
+# Datos personales inyectados en prompts
+USER_SYSTEM=ubuntu-wsl2
+USER_PHONE=+34...
+USER_EMAIL=...
+USER_PREFERENCES_PATH=/tmp/planner/user_preferences.txt
+CRONS_PATH=/tmp/planner/crons
+WORKFLOW_PATH=/tmp/planner/workflows
+```
+
+## Arranque Con Docker
+
+El camino mas reproducible es Docker Compose. Levanta:
+
+- `app`: FastAPI
+- `db`: PostgreSQL con pgvector
+- `redis`: Redis
+
+1. Exporta al menos tu clave de OpenAI:
 
 ```bash
-pip install -r requirements.txt
+export OPENAI_API_KEY="sk-..."
+```
+
+2. Levanta servicios:
+
+```bash
+docker compose up --build
+```
+
+3. Abre:
+
+```text
+http://localhost:8000
+```
+
+La app usa por defecto dentro de Docker:
+
+```env
+MULTIAGENT_PG_HOST=db
+MULTIAGENT_PG_DB=multiagente
+MULTIAGENT_PG_USER=admin
+MULTIAGENT_PG_PASSWORD=multi-claw-dev
+REDIS_URL=redis://redis:6379
+WORKING_PATH=/tmp/planner
+```
+
+Para parar:
+
+```bash
+docker compose down
+```
+
+Para borrar datos tambien:
+
+```bash
+docker compose down -v
+```
+
+## Arranque Local Sin Docker
+
+Requisitos:
+
+- Python 3.11 recomendado.
+- PostgreSQL accesible.
+- Redis accesible si quieres cache/rate limit persistente.
+- `OPENAI_API_KEY`.
+
+Instala dependencias minimas:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.docker.txt
 playwright install chromium
 ```
 
-### 3. Iniciar servidor
+Arranca:
 
 ```bash
-uvicorn main:app --reload --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Abre `index.html` en el navegador o accede a `http://localhost:8000`.
+## API
 
----
+### Chat
 
-## Endpoints API
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| `POST` | `/chat` | Enviar mensaje a un agente |
-| `GET` | `/conversations` | Listar todas las conversaciones |
-| `GET` | `/conversations/{id}` | Detalle de una conversación |
-| `DELETE` | `/session/{id}` | Eliminar sesión |
-| `POST` | `/twilio/webhook` | Webhook de WhatsApp/Twilio |
-
----
-
-## Ventajas frente a soluciones genéricas
-
-| Característica | Multi-Claw | Frameworks genéricos |
-|---|---|---|
-| Memoria semántica entre sesiones | ✅ Nativo | ⚠️ Plugin adicional |
-| Agentes especializados con roles | ✅ Configurables | ⚠️ Manual |
-| Ejecución de herramientas en paralelo | ✅ Nativo async | ⚠️ Variable |
-| Integración WhatsApp lista | ✅ Twilio integrado | ❌ No incluida |
-| Token tracking con caché | ✅ Automático | ❌ No incluido |
-| UI web incluida | ✅ Dark theme | ❌ No incluida |
-| Control de concurrencia por sesión | ✅ Session locking | ❌ No incluido |
-
----
-
-## Estructura del proyecto
-
+```http
+POST /chat
+Content-Type: application/json
+X-API-Key: <solo si CHAT_API_KEY esta definido>
 ```
-multi-claw/
-├── main.py                    # Entrada FastAPI
-├── index.html                 # UI web
+
+```json
+{
+  "session_id": "demo",
+  "username": "usuario",
+  "message": "Hola",
+  "conversation_type": null
+}
+```
+
+`POST /chat` tambien acepta `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
+
+### Conversaciones
+
+- `GET /conversations`
+- `GET /conversations/{session_id}`
+- `DELETE /session/{session_id}`
+- `DELETE /conversations/{session_id}`
+
+### Twilio
+
+- `POST /twilio/webhook`
+
+El webhook valida firma de Twilio si `TWILIO_VALIDATE_SIGNATURE=true`, limita remitentes con `TWILIO_ALLOWED_FROM`, aplica rate limits y divide respuestas largas en mensajes de maximo 250 palabras por defecto.
+
+## Herramientas De Agente
+
+Las herramientas se registran en dos sitios:
+
+- Esquema: `tools/local_tools.py`
+- Implementacion: `tools/ticket_dispatcher.py`
+
+Si una tool se quiere exponer a un agente, se anade tambien en `agents/agent_config.json`.
+
+## Memoria
+
+`tools/memoryTools/RAG_memory.py` hace:
+
+1. Divide texto conversacional en chunks semanticos.
+2. Genera embeddings con OpenAI.
+3. Guarda chunks en `multiagente.conversation_chunks`.
+4. Recupera memoria por:
+   - vector: `embedding <=> query_embedding`
+   - keyword: PostgreSQL FTS sobre `chunck`
+   - hybrid: fusion de rankings
+
+La tabla usa columna `embedding halfvec(3072)` si pgvector esta disponible. Si no lo esta, se usa `JSONB` y la busqueda vectorial devuelve vacio.
+
+## Tests
+
+```bash
+python -m unittest
+```
+
+Los tests actuales son unitarios y no requieren OpenAI real, Postgres ni Redis si el entorno esta razonablemente aislado.
+Por como estan inicializados algunos clientes globales, hoy si conviene tener `OPENAI_API_KEY`
+definida aunque sea con un valor de desarrollo; los tests no hacen llamadas reales a OpenAI.
+
+## Limitaciones Conocidas
+
+- `requirements.txt` historico viene de un entorno local grande. Para Docker/local limpio usa `requirements.docker.txt`.
+- Hay prompts con preferencias/rutas personales que conviene parametrizar antes de compartir el sistema.
+- Redis aun esta acoplado al runner principal; conviene hacer fallback in-memory para todo el flujo, no solo Twilio.
+- La API general solo queda protegida si configuras `CHAT_API_KEY`.
+- CORS esta abierto (`*`) en `main.py`; bien para desarrollo, no ideal para produccion.
+- Twilio responde en el mismo request. Si el agente tarda demasiado, conviene pasar a procesamiento background y responder por Twilio REST API.
+
+## Estructura
+
+```text
+.
+├── main.py
+├── index.html
 ├── agents/
-│   ├── agent_builder.py       # Carga y configura agentes
-│   ├── agent_prompts.py       # Prompts de sistema
-│   └── agent_config.json      # Definición de agentes y herramientas
+│   ├── agent_builder.py
+│   ├── agent_config.json
+│   └── agent_prompts.py
 ├── runner/
-│   └── agent_runner.py        # Motor de ejecución y orquestación
+│   └── agent_runner.py
 ├── tools/
-│   ├── local_tools.py         # Schemas de herramientas (50+)
-│   ├── ticket_dispatcher.py   # Lógica de ejecución
+│   ├── local_tools.py
+│   ├── ticket_dispatcher.py
 │   └── memoryTools/
-│       ├── RAG_memory.py      # Sistema RAG semántico
+│       ├── RAG_memory.py
 │       └── semantic_splitter.py
 ├── data/
-│   ├── conversation_store.py  # PostgreSQL async
-│   ├── redis_manager.py       # Gestión de sesiones Redis
-│   └── schemas.py             # Modelos Pydantic
-├── pricing/
-│   └── token_tracker.py       # Monitoreo de tokens
-└── integrations/
-    └── twilio/
-        └── router.py          # Webhook WhatsApp
+│   ├── conversation_store.py
+│   ├── redis_manager.py
+│   └── schemas.py
+├── integrations/
+│   └── twilio/
+│       └── router.py
+├── tests/
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.docker.txt
 ```
-
----
-
-<div align="center">
-
-Construido sobre OpenClaw · Versión personal con memoria mejorada
-
-</div>
-=======
-# multi-claw
-Versión personal openclaw multiagente memoria mejorada
-
-## Multimodal input
-
-`POST /chat` accepts optional `images` in addition to `message`. Each image can be provided as `url`, `path`, `data_url`, `file_id`, or raw `base64` with optional `mime_type` and `detail` (`low`, `high`, `auto`). Images are passed to the main Responses API call as `input_image` parts so the main agent can interpret them directly.
-
-`playwright_navigate` returns compact snapshots by default. Screenshots are saved to disk and return metadata/path unless `screenshot_mode` explicitly requests base64.
->>>>>>> 52dded7 (test added and minor changes)

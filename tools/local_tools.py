@@ -499,8 +499,10 @@ total_tools = [
     {
         "type": "function",
         "name": "DeviceManagerAgent",
-        "description": """Subagente encargado de Hacer cualquier gestión a nivel del servidor/dispositivo: crear/leer archivos, buscar archivos,
-        ejecutar comandos de terminal, cálculos python, etc.""",
+        "description": """Subagente encargado de realizar cualquier gestión a nivel de servidor o dispositivo: crear y leer archivos, buscar archivos, 
+        ejecutar comandos de terminal, realizar cálculos en Python, etc. Este agente mantiene el contexto de planes previos, por lo que no es necesario
+        proporcionarle el plan completo desde cero en cada interacción. Se le pueden dar instrucciones para continuar con una acción específica o modificar servicios previamente definidos.""",
+        
         "parameters": {
             "type": "object",
             "properties": {

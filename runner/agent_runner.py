@@ -95,7 +95,7 @@ class AgentRunner:
         self.session_manager = RedisSessionManager(redis_url=redis_url)
         self.conversation_store = conversation_store
         self.memory_rag = memory_rag
-        self._api_semaphore = asyncio.Semaphore(5)
+        self._api_semaphore = asyncio.Semaphore(10)
         self._background_tasks: set[asyncio.Task] = set()
 
         self._session_locks: dict[str, asyncio.Lock] = {}
