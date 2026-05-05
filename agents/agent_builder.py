@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from dotenv import load_dotenv
 from agents.agent_prompts import base_prompts
@@ -17,6 +18,8 @@ _DATOS_USUARIO = {
 }
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "agent_config.json")
+README_DESCRIPTION_MAX_CHARS = 20_000
+README_DESCRIPTION_MAX_WORDS = 100
 
 
 class AgentBuilder:
@@ -111,30 +114,75 @@ class AgentBuilder:
 
     # ── Prompt sections ──
 
-    def _list_directories(self, path: str) -> str:
-        result = []
-        for entry in os.scandir(path):
+    @staticmethod
+    def _clip_words(text: str, max_words: int = README_DESCRIPTION_MAX_WORDS) -> str:
+        words = text.split()
+        if len(words) <= max_words:
+            return " ".join(words)
+        return " ".join(words[:max_words])
+
+    def _read_readme_description(self, directory_path: str) -> str | None:
+        for filename in ("README.md", "readme.md"):
+            readme_path = os.path.join(directory_path, filename)
+            if not os.path.isfile(readme_path):
+                continue
+
+            try:
+                with open(readme_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(README_DESCRIPTION_MAX_CHARS)
+            except OSError:
+                return None
+
+            match = re.search(r"(?im)^\s*description\s*:\s*(.+?)\s*$", content)
+            if not match:
+                return None
+
+            description = self._clip_words(match.group(1).strip())
+            return description or None
+
+        return None
+
+    def _list_task_directories(self, path: str) -> str:
+        lines = []
+        for entry in sorted(os.scandir(path), key=lambda item: item.name.casefold()):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+
             stat = entry.stat()
             name = entry.name
-            size = stat.st_size
-            modified = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime))
-            created = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_ctime))
-            result.append(f"{name} | size: {size} | created: {created} | modified: {modified}")
-        return str(result)
+            description = self._read_readme_description(entry.path) or "sin descripcion en README.md"
+            modified = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+            created = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_ctime))
+            lines.append(
+                "\n".join(
+                    [
+                        f"- nombre: {name}",
+                        f"  ruta: {entry.path}",
+                        f"  description: {description}",
+                        f"  created: {created}",
+                        f"  modified: {modified}",
+                    ]
+                )
+            )
+        return "\n".join(lines)
 
     def _worflows_section(self) -> str:
         path = os.environ.get("WORKFLOW_PATH")
         if not path or not os.path.isdir(path):
             return ""
-        workflow_names = self._list_directories(path)
-        return f"Workflows creados: \n -{workflow_names} \n"
+        workflow_names = self._list_task_directories(path)
+        if not workflow_names:
+            return ""
+        return f"Workflows creados:\n{workflow_names}\n"
 
     def _crons_section(self) -> str:
         path = os.environ.get("CRONS_PATH")
         if not path or not os.path.isdir(path):
             return ""
-        cron_list = self._list_directories(path)
-        return f"Agentes Cron programados: \n -{cron_list} \n"
+        cron_list = self._list_task_directories(path)
+        if not cron_list:
+            return ""
+        return f"Agentes Cron programados:\n{cron_list}\n"
 
     def _programing_tasks(self) -> str:
 
@@ -152,7 +200,7 @@ class AgentBuilder:
         return (
             "## Preferencias del usuario ##\n"
             f"{prefs}\n\n"
-            "Se podrán añadir preferencias con la herramienta save_preference.\n"
+            "Se podrán añadir, modificar o eliminar preferencias con la herramienta save_preference.\n"
             "Otros metadatos del usuario: " + str(_DATOS_USUARIO)
         )
 

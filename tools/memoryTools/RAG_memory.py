@@ -8,7 +8,14 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from data.conversation_store import PostgresConversationStore
-from tools.memoryTools.semantic_splitter import EMBED_MODEL, semantic_split
+from tools.memoryTools.semantic_splitter import (
+    EMBED_MODEL,
+    MAX_TOKENS_PER_INPUT,
+    _get_encoder,
+    count_tokens,
+    semantic_split,
+    split_text_by_tokens,
+)
 
 MAX_OUTPUT_CHARS = 200_000
 MAX_OUTPUT_WORDS = 20_000
@@ -22,19 +29,39 @@ BLOCKED_SQL_KEYWORDS = {
 def _truncate_output(data: Any) -> dict:
     """Serialize data and truncate to 200K chars / 20K words."""
     output = json.dumps(data, default=str, ensure_ascii=False)
+    original_output = output
+    original_chars = len(output)
+    original_words = len(output.split())
     truncated = False
+    truncated_chars = 0
+    truncated_words = 0
 
     if len(output) > MAX_OUTPUT_CHARS:
+        truncated_chars = len(output) - MAX_OUTPUT_CHARS
         output = output[:MAX_OUTPUT_CHARS]
         truncated = True
 
     if len(output.split()) > MAX_OUTPUT_WORDS:
-        output = " ".join(output.split()[:MAX_OUTPUT_WORDS])
+        words = output.split()
+        truncated_words = len(words) - MAX_OUTPUT_WORDS
+        output = " ".join(words[:MAX_OUTPUT_WORDS])
         truncated = True
 
     if truncated:
-        return {"truncated": True, "result": output}
-    return {"truncated": False, "result": data}
+        return {
+            "truncated": True,
+            "remaining_chars": max(original_chars - len(output), truncated_chars, 0),
+            "remaining_words": max(original_words - len(output.split()), truncated_words, 0),
+            "remaining_tokens": max(count_tokens(original_output) - count_tokens(output), 0),
+            "result": output,
+        }
+    return {
+        "truncated": False,
+        "remaining_chars": 0,
+        "remaining_words": 0,
+        "remaining_tokens": 0,
+        "result": data,
+    }
 
 load_dotenv()
 
@@ -71,9 +98,14 @@ class MemoryRag:
         )[0]
 
     def embed_query(self, text: str) -> list[float]:
+        safe_input = split_text_by_tokens(
+            text.strip() or " ",
+            _get_encoder(),
+            MAX_TOKENS_PER_INPUT,
+        )[0]
         response = self.client.embeddings.create(
             model=EMBED_MODEL,
-            input=text.strip() or " ",
+            input=safe_input,
         )
         return list(response.data[0].embedding)
 
@@ -297,6 +329,9 @@ class MemoryRag:
                 "success": True,
                 "row_count": len(rows),
                 "truncated": out["truncated"],
+                "remaining_chars": out["remaining_chars"],
+                "remaining_words": out["remaining_words"],
+                "remaining_tokens": out["remaining_tokens"],
                 "data": out["result"],
             }
         except Exception as e:

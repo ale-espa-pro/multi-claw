@@ -2,7 +2,7 @@ total_tools = [
     {
         "type": "function",
         "name": "search_files",
-        "description": "Search files recursively using fuzzy matching against filenames.",
+        "description": "Search files recursively using fuzzy matching against filenames. Returns total_matches and remaining_results when limit hides matches.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -16,7 +16,7 @@ total_tools = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results +100 recommended"
+                    "description": "Maximum number of results +100 recommended. The result includes remaining_results for hidden matches."
                 }
             }
         },
@@ -196,7 +196,7 @@ total_tools = [
     {
         "type": "function",
         "name": "read_file",
-        "description": "Read and extract content from files like pdf, pptx, docx, csv, xlsx, txt, images. Always returns file_hash md5 for the file read.",
+        "description": "Read and extract content from files like pdf, pptx, docx, csv, xlsx, txt, images. Textual results include remaining_chars and remaining_tokens for content not shown after max_chars. Always returns file_hash md5 for the file read.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -206,7 +206,7 @@ total_tools = [
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Maximum characters to return for text files"
+                    "description": "Maximum characters to return for extracted text. The result includes remaining_chars and remaining_tokens for hidden content."
                 }
             }
         },
@@ -250,23 +250,41 @@ total_tools = [
     {
         "type": "function",
         "name": "save_preference",
-        "description": """Esta herramienta se usará cuando se detecte una preferencia del usuario o algun comportamiento repetitivo o información 
-        crítica del usuario que se quiera almacenar""",
+        "description": """Gestiona preferencias del usuario en USER_PREFERENCES_PATH.
+        Uso recomendado: action='add' con preference para añadir; action='delete' con old_text para eliminar;
+        action='replace' con old_text y new_text para modificar.""",
         "parameters": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Operacion a realizar. add añade preference; delete elimina old_text; replace sustituye old_text por new_text.",
+                    "enum": ["add", "replace", "delete"]
+                },
                 "preference": {
                     "type": "string",
-                    "description": "Información simple y descriptiva de lo que se desea almacenar. Maximo 40 palabras"
+                    "description": "Preferencia nueva a añadir cuando action='add'."
                 },
+                "old_text": {
+                    "type": "string",
+                    "description": "Texto exacto existente a eliminar o reemplazar."
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "Nuevo texto cuando action='replace'."
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "true para reemplazar todas las ocurrencias, false (default) solo la primera"
+                }
             }
         },
-        "required": ["preference"]
+        "required": ["action"]
     },
     {
         "type": "function",
         "name": "web_fetch",
-        "description": "Descarga el contenido HTML/JSON de una URL. Usar para consultar APIs, leer páginas web estáticas o verificar endpoints. Para páginas con JS dinámico o interacción usa playwright_navigate.",
+        "description": "Descarga el contenido HTML/JSON de una URL. Devuelve remaining_chars y remaining_tokens si max_chars recorta contenido. Usar para consultar APIs, leer páginas web estáticas o verificar endpoints. Para páginas con JS dinámico o interacción usa playwright_navigate.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -293,7 +311,7 @@ total_tools = [
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Máximo de caracteres a retornar del cuerpo de la respuesta"
+                    "description": "Máximo de caracteres a retornar del cuerpo de la respuesta. El resultado incluye remaining_chars y remaining_tokens para contenido oculto."
                 }
             }
         },
@@ -302,7 +320,7 @@ total_tools = [
     {
         "type": "function",
         "name": "playwright_navigate",
-        "description": "Navega e interactúa con páginas web usando Chromium headless. Devuelve snapshots compactos por defecto para evitar HTML/base64 gigante en el contexto. Para páginas estáticas o APIs usar web_fetch.",
+        "description": "Navega e interactúa con páginas web usando Chromium headless. Devuelve snapshots compactos por defecto para evitar HTML/base64 gigante en el contexto; los campos truncados incluyen *_remaining_chars y *_remaining_tokens. Para páginas estáticas o APIs usar web_fetch.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -329,7 +347,7 @@ total_tools = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout en segundos (default 15, max 60)"
+                    "description": "Timeout en segundos (default 300, max 600)"
                 },
                 "headless": {
                     "type": "boolean",
@@ -337,7 +355,7 @@ total_tools = [
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Máximo de caracteres para texto/HTML devuelto (default 12000)"
+                    "description": "Máximo de caracteres para texto/HTML devuelto (default 12000). Los resultados truncados incluyen remaining_chars/remaining_tokens o *_remaining_chars/*_remaining_tokens."
                 },
                 "include_html": {
                     "type": "boolean",
@@ -367,6 +385,126 @@ total_tools = [
             }
         },
         "required": ["url"]
+    },
+    {
+        "type": "function",
+        "name": "playwright_session",
+        "description": "Mantiene una sesión persistente de Chromium para automatizaciones web largas y formularios multi-step. Usa esta herramienta cuando haya cookies, modales, login, uploads, radios, selects, submits o confirmaciones que deban conservar estado entre acciones.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "ID estable de la sesión. Si se omite en start/goto/batch se crea uno y se devuelve para reutilizarlo."
+                },
+                "action": {
+                    "type": "string",
+                    "description": "Acción principal. 'batch' ejecuta varias acciones en la misma página y sesión.",
+                    "enum": [
+                        "start", "goto", "batch", "click", "fill", "check", "uncheck",
+                        "select_option", "press", "upload", "wait_for_selector",
+                        "wait_for_text", "wait_for_url", "wait_for_load_state",
+                        "get_text", "snapshot", "inspect", "screenshot", "evaluate",
+                        "list", "close"
+                    ]
+                },
+                "url": {
+                    "type": "string",
+                    "description": "URL completa para start/goto o wait_for_url."
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "Selector CSS/XPath para click, fill, check, uncheck, select_option, upload, press o get_text."
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Valor textual para fill, select_option, press, evaluate o una ruta de archivo en upload."
+                },
+                "actions": {
+                    "type": "array",
+                    "description": "Secuencia de acciones a ejecutar en una misma sesión. Cada item acepta type/action, url, selector, value, values, file_paths, key, text, script, wait_for, wait_for_text, wait_for_url, wait_for_load_state, wait_ms.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "description": "Tipo de paso: goto, click, fill, check, uncheck, select_option, press, upload, wait_for_selector, wait_for_text, wait_for_url, wait_for_load_state, get_text, snapshot, screenshot, evaluate."
+                            },
+                            "url": {"type": "string"},
+                            "selector": {"type": "string"},
+                            "value": {"type": "string"},
+                            "values": {
+                                "type": "array",
+                                "description": "Lista de valores para select_option.",
+                                "items": {"type": "string"}
+                            },
+                            "file_paths": {
+                                "type": "array",
+                                "description": "Lista de rutas para upload/set_input_files.",
+                                "items": {"type": "string"}
+                            },
+                            "key": {"type": "string"},
+                            "text": {"type": "string"},
+                            "script": {"type": "string"},
+                            "state": {"type": "string"},
+                            "wait_for": {"type": "string"},
+                            "wait_for_text": {"type": "string"},
+                            "wait_for_url": {"type": "string"},
+                            "wait_for_load_state": {"type": "string"},
+                            "wait_ms": {"type": "integer"}
+                        }
+                    }
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout máximo en segundos para navegación/acciones (default 300, max 2700)."
+                },
+                "headless": {
+                    "type": "boolean",
+                    "description": "Ejecutar Chromium sin interfaz gráfica (default true)."
+                },
+                "user_data_dir": {
+                    "type": "string",
+                    "description": "Directorio de perfil persistente de Chromium para conservar cookies/login entre sesiones."
+                },
+                "storage_state_path": {
+                    "type": "string",
+                    "description": "Ruta JSON para cargar/guardar storage_state de Playwright."
+                },
+                "save_storage_state": {
+                    "type": "boolean",
+                    "description": "Guardar storage_state al final de la llamada o al cerrar la sesión."
+                },
+                "include_snapshot": {
+                    "type": "boolean",
+                    "description": "Incluir snapshot final compacto. Default true."
+                },
+                "include_html": {
+                    "type": "boolean",
+                    "description": "Incluir HTML recortado en el snapshot. Default false."
+                },
+                "include_text": {
+                    "type": "boolean",
+                    "description": "Incluir texto visible recortado en el snapshot. Default true."
+                },
+                "include_elements": {
+                    "type": "boolean",
+                    "description": "Incluir links, botones, campos y formularios principales. Default true."
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Máximo de caracteres para texto/HTML devuelto en snapshots."
+                },
+                "full_page": {
+                    "type": "boolean",
+                    "description": "Capturar página completa en screenshot. Default true."
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Directorio donde guardar screenshots. Default /tmp/planner_playwright o PLAYWRIGHT_OUTPUT_DIR."
+                }
+            }
+        }
     },
     {
         "type": "function",
@@ -449,7 +587,7 @@ total_tools = [
         - Stats: SELECT session_id, COUNT(*) FROM multiagente.conversation_chunks GROUP BY session_id ORDER BY count DESC
         - Buscar en JSONB: SELECT session_id FROM multiagente.conversations WHERE context_jsonb::text ILIKE '%keyword%'
 
-        NOTA: Solo SELECT/WITH. Output limitado a 200K caracteres / 20K palabras.""",
+        NOTA: Solo SELECT/WITH. Output limitado a 200K caracteres / 20K palabras. Si se recorta, devuelve remaining_chars, remaining_words y remaining_tokens.""",
         "parameters": {
             "type": "object",
             "properties": {
@@ -488,9 +626,9 @@ total_tools = [
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {
+                "plan": {
                     "type": "string",
-                    "description": "Consulta/s que se desea delegar al subagente web"
+                    "description": "plan de Consulta/s que se desea delegar al subagente web"
                 }
             }
         },
@@ -509,6 +647,21 @@ total_tools = [
                 "query": {
                     "type": "string",
                     "description": "Consulta o plan deseado para el agente"
+                }
+            }
+        },
+        "required": ["query"]
+    },
+    {
+        "type": "function",
+        "name": "PlaywrightSessionAgent",
+        "description": "Subagente especializado en automatizaciones web largas con Playwright persistente: formularios multi-step, ATS, cookies, uploads, radios, selects, submits, capturas y confirmaciones.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Objetivo web completo, URLs, datos a introducir, rutas de archivos a subir y criterios de éxito/confirmación."
                 }
             }
         },

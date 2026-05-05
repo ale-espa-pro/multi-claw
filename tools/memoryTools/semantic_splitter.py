@@ -9,7 +9,7 @@ Semantic splitter optimizado:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -65,8 +65,26 @@ class SplitResultOpt:
 # ── Embeddings masivos en paralelo ────────────────────────────────
 
 MAX_TOKENS_PER_BATCH = 80_000  # margen de seguridad vs el hard limit de 300K
+MAX_TOKENS_PER_INPUT = 7_500
 EMBED_MODEL = "text-embedding-3-large"  # o el modelo que uses
 MAX_ITEMS_PER_BATCH = 2048
+
+
+def split_text_by_tokens(
+    text: str,
+    encoder: tiktoken.Encoding,
+    max_tokens: int = MAX_TOKENS_PER_INPUT,
+) -> list[str]:
+    token_ids = encoder.encode(text)
+    if len(token_ids) <= max_tokens:
+        return [text]
+
+    chunks: list[str] = []
+    for start in range(0, len(token_ids), max_tokens):
+        chunk = encoder.decode(token_ids[start:start + max_tokens])
+        if chunk.strip():
+            chunks.append(chunk)
+    return chunks
 
 def _split_into_batches(
     texts: list[str],
@@ -111,7 +129,18 @@ def get_embeddings_parallel(
     texts = [t if t.strip() else " " for t in texts]
     
     enc = encoder or _get_encoder()
-    # ... resto igual
+    oversized = []
+    for idx, text in enumerate(texts):
+        token_count = len(enc.encode(text))
+        if token_count > MAX_TOKENS_PER_INPUT:
+            oversized.append((idx, token_count))
+    if oversized:
+        idx, token_count = oversized[0]
+        raise ValueError(
+            f"embedding input {idx} has {token_count} tokens; "
+            f"split it before embedding (max {MAX_TOKENS_PER_INPUT})"
+        )
+
     batch_indices = _split_into_batches(texts, enc)
 
     # Pre-alocar resultado; se llena in-place para evitar copias
@@ -151,7 +180,11 @@ def cosine_similarities(embeddings: np.ndarray) -> np.ndarray:
 # ── Splitting semántico (sin cambios lógicos) ─────────────────────
 
 def split_into_sentences(
-    text: str, separators: list[str] | str = SEPARATORS_DEFAULT,
+    text: str,
+    separators: list[str] | str = SEPARATORS_DEFAULT,
+    *,
+    encoder: tiktoken.Encoding | None = None,
+    max_segment_tokens: int = MAX_TOKENS_PER_INPUT,
 ) -> tuple[list[str], list[tuple[int, int]]]:
     """
     Divide texto en segmentos base y devuelve (sentences, spans).
@@ -165,25 +198,43 @@ def split_into_sentences(
     sentences: list[str] = []
     spans: list[tuple[int, int]] = []
     last_end = 0
+    enc = encoder or _get_encoder()
+
+    def append_segment(seg: str, absolute_start: int):
+        stripped = seg.strip()
+        if not stripped:
+            return
+
+        left_pad = len(seg) - len(seg.lstrip())
+        segment_start = absolute_start + left_pad
+        segment_end = segment_start + len(stripped)
+        token_pieces = split_text_by_tokens(stripped, enc, max_segment_tokens)
+
+        if len(token_pieces) == 1:
+            sentences.append(stripped)
+            spans.append((segment_start, segment_end))
+            return
+
+        cursor = segment_start
+        for piece in token_pieces:
+            piece_text = piece.strip()
+            if not piece_text:
+                cursor += len(piece)
+                continue
+            piece_start = cursor + max(0, piece.find(piece_text))
+            piece_end = min(segment_end, piece_start + len(piece_text))
+            sentences.append(piece_text)
+            spans.append((piece_start, piece_end))
+            cursor += len(piece)
 
     for m in re.finditer(pattern, text):
         seg = text[last_end:m.start()]
-        stripped = seg.strip()
-        if stripped:
-            left_pad = len(seg) - len(seg.lstrip())
-            start = last_end + left_pad
-            sentences.append(stripped)
-            spans.append((start, start + len(stripped)))
+        append_segment(seg, last_end)
         last_end = m.end()
 
     # Último segmento tras el último separador
     seg = text[last_end:]
-    stripped = seg.strip()
-    if stripped:
-        left_pad = len(seg) - len(seg.lstrip())
-        start = last_end + left_pad
-        sentences.append(stripped)
-        spans.append((start, start + len(stripped)))
+    append_segment(seg, last_end)
 
     return sentences, spans
 
@@ -306,14 +357,20 @@ def semantic_split(
     """
     texts = [t if t.strip() else " " for t in texts]
     encoder = _get_encoder()
+    max_segment_tokens = min(max_tokens or MAX_TOKENS_PER_INPUT, MAX_TOKENS_PER_INPUT)
     # ─── Fase 1: dividir todos los textos en oraciones ───
     per_text: list[dict] = []  # {sentences, spans, trivial, text}
     all_sentences: list[str] = []
     sentence_ranges: list[tuple[int, int]] = []  # (start, end) en all_sentences
 
     for idx, text in enumerate(texts):
-        sents, spans = split_into_sentences(text, separators)
-        trivial = len(sents) <= 2
+        sents, spans = split_into_sentences(
+            text,
+            separators,
+            encoder=encoder,
+            max_segment_tokens=max_segment_tokens,
+        )
+        trivial = len(sents) <= 2 and count_tokens(text, encoder) <= max_segment_tokens
         start = len(all_sentences)
 
         if trivial:

@@ -26,6 +26,7 @@ class PostgresConversationStore:
         self.password = password or os.getenv("MULTIAGENT_PG_PASSWORD")
         raw_schema = os.getenv("MULTIAGENT_PG_SCHEMA", "multiagente")
         self.schema = re.sub(r"[^a-zA-Z0-9_]", "", raw_schema) or "multiagente"
+        self.main_agent = os.getenv("MULTIAGENT_MAIN_AGENT", "ExecutorAgent")
         self.pool: AsyncConnectionPool | None = None
         self.vector_enabled = False
 
@@ -119,26 +120,38 @@ class PostgresConversationStore:
 
     def _select_primary_conversation_items(self, context_jsonb: Any) -> list[dict[str, Any]]:
         normalized_context = self._normalize_context(context_jsonb)
+
+        primary_items = self._visible_items_for_agent(
+            self.main_agent,
+            normalized_context.get(self.main_agent, []),
+        )
+        if primary_items:
+            return primary_items
+
         best_items: list[dict[str, Any]] = []
         best_score = -1
 
         for agent_name, items in normalized_context.items():
-            visible_items = []
-            score = 0
-            for item in items:
-                if item.get("type") != "message":
-                    continue
-                role = item.get("role")
-                if role not in {"user", "assistant"}:
-                    continue
-                visible_items.append({"agent_name": agent_name, **item})
-                score += 1
+            visible_items = self._visible_items_for_agent(agent_name, items)
+            score = len(visible_items)
 
             if score > best_score:
                 best_score = score
                 best_items = visible_items
 
         return best_items
+
+    @staticmethod
+    def _visible_items_for_agent(agent_name: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        visible_items = []
+        for item in items:
+            if item.get("type") != "message":
+                continue
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            visible_items.append({"agent_name": agent_name, **item})
+        return visible_items
 
     @staticmethod
     def _vector_literal(embedding: list[float]) -> str:

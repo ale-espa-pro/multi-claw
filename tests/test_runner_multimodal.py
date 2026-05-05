@@ -76,6 +76,37 @@ class RunnerMultimodalTests(unittest.TestCase):
         self.assertIn("[ExecutorAgent] user: analiza", memory_text)
         self.assertIn("[ExecutorAgent] user: [1 imagen(es) adjunta(s)]", memory_text)
 
+    def test_context_delta_extracts_only_new_items_after_truncation(self):
+        runner = object.__new__(AgentRunner)
+        runner.agent_names = {"ExecutorAgent"}
+        before = {
+            "ExecutorAgent": [
+                AgentRunner._build_user_message_item("antiguo 1"),
+                AgentRunner._build_user_message_item("antiguo 2"),
+                AgentRunner._build_user_message_item("antiguo 3"),
+            ]
+        }
+        after = {
+            "ExecutorAgent": [
+                AgentRunner._build_user_message_item("antiguo 2"),
+                AgentRunner._build_user_message_item("antiguo 3"),
+                AgentRunner._build_user_message_item("nuevo"),
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": '{"tool": "resultado completo"}',
+                },
+            ]
+        }
+
+        delta = runner._build_context_delta(before, after)
+        memory_text = runner._serialize_context_for_memory(delta)
+
+        self.assertNotIn("antiguo 1", memory_text)
+        self.assertNotIn("antiguo 2", memory_text)
+        self.assertIn("[ExecutorAgent] user: nuevo", memory_text)
+        self.assertIn('{"tool": "resultado completo"}', memory_text)
+
     def test_retrieval_mode_normalization_is_conservative(self):
         self.assertEqual(AgentRunner._normalize_retrieval_mode("hybrid"), "hybrid")
         self.assertEqual(AgentRunner._normalize_retrieval_mode("keyword"), "keyword")

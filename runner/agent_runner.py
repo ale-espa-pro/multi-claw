@@ -99,6 +99,7 @@ class AgentRunner:
         self._background_tasks: set[asyncio.Task] = set()
 
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._memory_locks: dict[str, asyncio.Lock] = {}
         self._locks_lock = asyncio.Lock()
 
     # ── Context normalization ──
@@ -238,6 +239,34 @@ class AgentRunner:
                     if isinstance(output, str) and output:
                         lines.append(f"[{agent_name}] function_output: {output}")
         return "\n".join(lines)
+
+    def _build_context_delta(
+        self,
+        before_context: dict[str, Any],
+        after_context: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        before = self._normalize_full_context(before_context)
+        after = self._normalize_full_context(after_context)
+        delta: dict[str, list[dict[str, Any]]] = {}
+
+        for agent_name in self.agent_names:
+            before_items = before.get(agent_name, [])
+            after_items = after.get(agent_name, [])
+            overlap = self._find_context_overlap(before_items, after_items)
+            delta[agent_name] = copy.deepcopy(after_items[overlap:])
+
+        return delta
+
+    @staticmethod
+    def _find_context_overlap(
+        before_items: list[dict[str, Any]],
+        after_items: list[dict[str, Any]],
+    ) -> int:
+        max_overlap = min(len(before_items), len(after_items))
+        for overlap in range(max_overlap, 0, -1):
+            if before_items[-overlap:] == after_items[:overlap]:
+                return overlap
+        return 0
 
     @staticmethod
     def _serialize_tool_result(result: Any) -> str:
@@ -448,24 +477,27 @@ class AgentRunner:
         self,
         session_id: str,
         context: dict[str, list[dict[str, Any]]],
+        previous_context: dict[str, list[dict[str, Any]]] | None = None,
         conversation_type: str | None = None,
     ):
         if self.memory_rag is None:
             return
 
-        context_snapshot = self._normalize_full_context(context)
+        context_snapshot = self._build_context_delta(previous_context or {}, context)
         memory_text = self._serialize_context_for_memory(context_snapshot)
         if not memory_text.strip():
             return
 
         async def _runner():
             try:
-                await self.memory_rag.store_text_embeddings(
-                    session_id=session_id,
-                    text=memory_text,
-                    conversation_type=conversation_type,
-                    replace=True,
-                )
+                lock = await self._get_memory_lock(session_id)
+                async with lock:
+                    await self.memory_rag.store_text_embeddings(
+                        session_id=session_id,
+                        text=memory_text,
+                        conversation_type=conversation_type,
+                        replace=False,
+                    )
             except Exception as exc:
                 print(f"\033[1;31m  [MEMORY] Sync error for {session_id}: {exc}\033[0m")
 
@@ -515,6 +547,14 @@ class AgentRunner:
                 self._session_locks[session_id] = lock
             return lock
 
+    async def _get_memory_lock(self, session_id: str) -> asyncio.Lock:
+        async with self._locks_lock:
+            lock = self._memory_locks.get(session_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._memory_locks[session_id] = lock
+            return lock
+
     async def _cleanup_session_lock(self, session_id: str):
         async with self._locks_lock:
             lock = self._session_locks.get(session_id)
@@ -538,6 +578,7 @@ class AgentRunner:
             exec_ctx = ExecutionContext(session_id, self.agent_names, conversation_type)
             try:
                 exec_ctx.context = await self._load_complete_context(session_id)
+                previous_context = copy.deepcopy(exec_ctx.context)
 
                 response = await self._chat(user_input, agent_name, exec_ctx, images=images)
 
@@ -549,6 +590,7 @@ class AgentRunner:
                 self._schedule_semantic_memory_sync(
                     session_id=session_id,
                     context=exec_ctx.context,
+                    previous_context=previous_context,
                     conversation_type=conversation_type,
                 )
                 exec_ctx.token_tracker.print_summary()
@@ -581,6 +623,7 @@ class AgentRunner:
             exec_ctx = ExecutionContext(session_id, self.agent_names, conversation_type)
             try:
                 exec_ctx.context = await self._load_complete_context(session_id)
+                previous_context = copy.deepcopy(exec_ctx.context)
 
                 response = await self._chat(user_input, agent_name, exec_ctx, images=images)
 
@@ -592,6 +635,7 @@ class AgentRunner:
                 self._schedule_semantic_memory_sync(
                     session_id=session_id,
                     context=exec_ctx.context,
+                    previous_context=previous_context,
                     conversation_type=conversation_type,
                 )
                 return {"response": response, "token_usage": exec_ctx.token_tracker.get_usage()}
@@ -632,7 +676,7 @@ class AgentRunner:
                 model="gpt-5.4",
                 input=messages,
                 tools=curr_agent_tools,
-                reasoning={"effort": "medium", "summary": "auto"},
+                reasoning={"effort": "high", "summary": "auto"},
                 **kwargs,
             )
 
@@ -812,6 +856,7 @@ class AgentRunner:
             await self.conversation_store.delete_conversation(session_id)
         async with self._locks_lock:
             self._session_locks.pop(session_id, None)
+            self._memory_locks.pop(session_id, None)
 
     async def close(self):
         await self.session_manager.close()
