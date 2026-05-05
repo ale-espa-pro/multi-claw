@@ -9,7 +9,7 @@
         "json_response": true
     },
     "DeviceManagerAgent": {
-        "tools": ["read_file", "run_python", "run_command", "write_file", "edit_file", "WebSearchAgent", "memory_query", "playwright_navigate", "web_fetch", "interpret_image"],
+        "tools": ["read_file", "file_hash", "run_python", "run_command", "write_file", "edit_file", "WebSearchAgent", "memory_query", "playwright_navigate", "web_fetch", "interpret_image"],
         "json_response": true
     },
     "CronosAgent": {

@@ -96,7 +96,7 @@ total_tools = [
     {
         "type": "function",
         "name": "write_file",
-        "description": "Crea o escribe contenido en un archivo de texto. USAR SIEMPRE para crear archivos en vez de run_python. Rutas permitidas: ~/Downloads, ~/Documents, ~/Desktop, /tmp.",
+        "description": "Crea o escribe contenido en un archivo de texto. Devuelve file_hash md5 del estado final. USAR SIEMPRE para crear archivos en vez de run_python. Rutas permitidas: ~/Downloads, ~/Documents, ~/Desktop, /tmp.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -121,6 +121,7 @@ total_tools = [
         "type": "function",
         "name": "edit_file",
         "description": """Modifica un archivo existente reemplazando un fragmento de texto exacto por otro, sin reescribir el archivo entero.
+        Devuelve file_hash md5 del estado final.
         Funciona como search-and-replace: busca 'old_text' en el archivo y lo sustituye por 'new_text'.
         - old_text debe coincidir EXACTAMENTE con el contenido del archivo (incluyendo espacios, indentación y saltos de línea).
         - Para eliminar texto, pasar new_text vacío ("").
@@ -195,7 +196,7 @@ total_tools = [
     {
         "type": "function",
         "name": "read_file",
-        "description": "Read and extract content from files like pdf, pptx, docx, csv, xlsx, txt, images.",
+        "description": "Read and extract content from files like pdf, pptx, docx, csv, xlsx, txt, images. Always returns file_hash md5 for the file read.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -206,6 +207,25 @@ total_tools = [
                 "max_chars": {
                     "type": "integer",
                     "description": "Maximum characters to return for text files"
+                }
+            }
+        },
+        "required": ["path"]
+    },
+    {
+        "type": "function",
+        "name": "file_hash",
+        "description": "Calcula de forma eficiente el hash md5 de un archivo en streaming para comprobar si cambió sin leer su contenido en el contexto.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Ruta absoluta o relativa del archivo"
+                },
+                "compare_to": {
+                    "type": "string",
+                    "description": "Hash previo opcional. Si se proporciona, la respuesta incluye changed=true/false"
                 }
             }
         },

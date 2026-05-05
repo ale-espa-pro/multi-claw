@@ -5,6 +5,7 @@ ticket_dispatcher.py — Dispatch de acciones para agentes y herramientas.
 import asyncio
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import mimetypes
@@ -38,6 +39,8 @@ DEFAULT_MAX_CHARS = 200_000
 DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 12_000
 DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT = 40
+FILE_HASH_ALGORITHM = "md5"
+HASH_CHUNK_BYTES = 1024 * 1024
 
 ALLOWED_WRITE_ROOTS = [
     os.path.expanduser("~/Downloads"),
@@ -77,6 +80,23 @@ SAFE_BUILTINS = {
 def _resolve_path(path: str) -> str:
     """Expande ~ y variables de entorno, luego resuelve a ruta absoluta."""
     return os.path.realpath(os.path.expandvars(os.path.expanduser(path)))
+
+
+def _file_hash(path: str) -> dict:
+    """Calcula hash en streaming para no cargar archivos grandes en memoria."""
+    hasher = hashlib.md5()
+
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(HASH_CHUNK_BYTES), b""):
+            hasher.update(chunk)
+
+    stat = os.stat(path)
+    return {
+        "algorithm": FILE_HASH_ALGORITHM,
+        "value": hasher.hexdigest(),
+        "bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
 
 
 # ── Herramientas: Archivos ──────────────────────────────────────────
@@ -131,10 +151,41 @@ def action_read_file(body: dict) -> dict:
     try:
         reader = _FILE_READERS.get(ext)
         if reader:
-            return reader(path, mime, max_chars)
-        return _read_binary(path, mime)
+            result = reader(path, mime, max_chars)
+        else:
+            result = _read_binary(path, mime)
+        if result.get("success"):
+            result["file_hash"] = _file_hash(path)
+        return result
     except Exception as e:
         return {"success": False, "path": path, "mime": mime, "error": str(e)}
+
+
+def action_file_hash(body: dict) -> dict:
+    """Devuelve una huella eficiente del archivo. Requiere: path."""
+    path = body.get("path")
+    if not path:
+        return {"success": False, "error": "missing required field: path"}
+
+    real_path = _resolve_path(path)
+    if not os.path.isfile(real_path):
+        return {"success": False, "error": f"file not found: {real_path}", "path": real_path}
+
+    compare_to = (body.get("compare_to") or "").strip() or None
+
+    try:
+        file_hash = _file_hash(real_path)
+    except Exception as e:
+        return {"success": False, "path": real_path, "error": str(e)}
+
+    result = {
+        "success": True,
+        "path": real_path,
+        "file_hash": file_hash,
+    }
+    if compare_to is not None:
+        result["changed"] = file_hash["value"] != compare_to
+    return result
 
 
 def action_write_file(body: dict) -> dict:
@@ -173,6 +224,7 @@ def action_write_file(body: dict) -> dict:
             "success": True,
             "path": real_path,
             "bytes_written": len(content.encode(encoding)),
+            "file_hash": _file_hash(real_path),
         }
     except Exception as e:
         return {"success": False, "path": real_path, "error": str(e)}
@@ -240,6 +292,7 @@ def action_edit_file(body: dict) -> dict:
             "success": True,
             "path": real_path,
             "replacements": replacements,
+            "file_hash": _file_hash(real_path),
         }
     except Exception as e:
         return {"success": False, "path": real_path, "error": str(e)}
@@ -883,6 +936,7 @@ _AGENTS = [
 ticket_dispatcher: dict[str, callable] = {
     **{name: _passthrough_agent for name in _AGENTS},
     "read_file": action_read_file,
+    "file_hash": action_file_hash,
     "write_file": action_write_file,
     "edit_file": action_edit_file,
     "run_command": action_run_command,
