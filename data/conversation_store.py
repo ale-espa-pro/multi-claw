@@ -9,7 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 
 
 class PostgresConversationStore:
-    """Persistencia minima del snapshot completo de una conversacion."""
+    """Persistencia mínima del snapshot completo de una conversación."""
 
     def __init__(
         self,
@@ -541,7 +541,7 @@ class PostgresConversationStore:
                 return await cur.fetchall()
 
     async def execute_readonly_query(self, sql: str) -> list[dict[str, Any]]:
-        """Execute a SQL query inside a READ ONLY transaction for safety."""
+        """Execute a SQL query inside a read-only transaction for safety."""
         pool = self._require_pool()
         async with pool.connection() as conn:
             async with conn.transaction():

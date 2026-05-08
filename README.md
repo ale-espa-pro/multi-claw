@@ -7,9 +7,9 @@
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![OpenAI](https://img.shields.io/badge/OpenAI-Responses_API-111111?style=for-the-badge&logo=openai&logoColor=white)
 
-**Multi-Claw es un laboratorio local de agentes autonomos con memoria profunda.**
+**Multi-Claw es un laboratorio local de agentes autónomos con memoria profunda.**
 
-No es "un chatbot con herramientas": es un runtime para agentes que trabajan, delegan, ejecutan, guardan trazabilidad y luego pueden reconstruir que paso.
+No es "un chatbot con herramientas": es un runtime para agentes que trabajan, delegan, ejecutan, guardan trazabilidad y luego pueden reconstruir qué pasó.
 
 ```text
 Multi-Claw = multiagente + memoria accionable + workflows + runtime local
@@ -20,46 +20,46 @@ Multi-Claw = multiagente + memoria accionable + workflows + runtime local
 ## Highlights
 
 - 🧠 **Memoria operacional:** conversaciones, chunks, `context_jsonb`, decisiones, tools, subagentes y artefactos.
-- ⚙️ **Agentes autonomos:** tareas periodicas tipo cron, con estado y trazabilidad.
+- ⚙️ **Agentes autónomos:** tareas periódicas tipo cron, con estado y trazabilidad.
 - 🧩 **Workflows versionables:** playbooks, prompts y SQL templates como habilidades reutilizables.
-- 💸 **Menos coste/context rotting:** subtareas delegables a agentes/modelos mas baratos.
+- 💸 **Menos coste/context rotting:** subtareas delegables a agentes/modelos más baratos.
 - 🛡️ **Aislamiento extra:** agentes, contratos y tools separados reducen superficie ante prompt injection.
-- 🔎 **Retrieval multitemporal:** consultas por sesion, fecha, evento, herramienta, subagente o texto literal.
+- 🔎 **Retrieval multitemporal:** consultas por sesión, fecha, evento, herramienta, subagente o texto literal.
 
-> En uso real interno ha funcionado bien con historiales de mas de 20M tokens. Falta benchmark formal: prometedor, no una garantia.
+> En uso real interno ha funcionado bien con historiales de más de 20M tokens. Falta benchmark formal: prometedor, no una garantía.
 
 ## Frente A OpenClaw Y Similares
 
-OpenClaw esta mas maduro como producto: mejor instalacion, mas canales, mas ecosistema y una memoria muy trabajada con archivos, SQLite/hybrid search, QMD, Honcho y wiki.
+OpenClaw está más maduro como producto: mejor instalación, más canales, más ecosistema y una memoria muy trabajada con archivos, SQLite/hybrid search, QMD, Honcho y wiki.
 
-Multi-Claw vende otra cosa: **memoria como caja negra consultable de la ejecucion del agente**.
+Multi-Claw vende otra cosa: **memoria como caja negra consultable de la ejecución del agente**.
 
 | Area | OpenClaw / similares | Multi-Claw |
 | --- | --- | --- |
-| Producto | Mas pulido | Mas experimental y hackeable |
-| Memoria | Notas, sesiones, indices y backends | PostgreSQL + chunks + `context_jsonb` |
-| Foco | Asistente local completo | Auditoria, retrieval y automatizacion profunda |
+| Producto | Más pulido | Más experimental y hackeable |
+| Memoria | Notas, sesiones, índices y backends | PostgreSQL + chunks + `context_jsonb` |
+| Foco | Asistente local completo | Auditoría, retrieval y automatización profunda |
 | Recall | Knowledge/user memory | Acciones, tools, subagentes y temporalidad |
 | Coste | Runtime generalista | Delegacion multiagente para contener contexto |
-| Seguridad | Ecosistema mas maduro | Aislamiento por agentes/contratos como capa adicional |
+| Seguridad | Ecosistema más maduro | Aislamiento por agentes/contratos como capa adicional |
 
 Referencias: [OpenClaw Memory](https://docs.openclaw.ai/concepts/memory) y [OpenClaw Multi-Agent](https://docs.openclaw.ai/concepts/multi-agent).
 
 ## Casos Que Quiere Resolver
 
-- "Que decision tomo el agente sobre este proyecto hace tres semanas?"
-- "Que subagente genero este archivo y bajo que contrato?"
-- "Que tool fallo antes de que apareciera este bug?"
-- "Donde se mezclan tema A, fecha B y herramienta C?"
-- "Que preferencias del usuario cambiaron esta respuesta?"
+- "¿Qué decisión tomó el agente sobre este proyecto hace tres semanas?"
+- "¿Qué subagente generó este archivo y bajo qué contrato?"
+- "¿Qué tool falló antes de que apareciera este bug?"
+- "¿Dónde se mezclan tema A, fecha B y herramienta C?"
+- "¿Qué preferencias del usuario cambiaron esta respuesta?"
 
 ## Estado Real
 
-Experimental, local-first y todavia no empaquetado como producto. Necesita `OPENAI_API_KEY`, PostgreSQL y, recomendado, Redis. `pgvector` activa la busqueda vectorial; sin el, los embeddings quedan guardados pero no hay retrieval vectorial real.
+Experimental, local-first y todavía no empaquetado como producto. Necesita `OPENAI_API_KEY`, PostgreSQL y, de forma recomendada, Redis. `pgvector` activa la búsqueda vectorial; sin él, los embeddings quedan guardados pero no hay retrieval vectorial real.
 
 No expongas esto a Internet sin revisar auth, CORS, tools de comandos y permisos de escritura.
 
-## Arranque Rapido Para Un Clone Nuevo
+## Arranque Rápido Para Un Clone Nuevo
 
 ```bash
 git clone <url-del-repo>
@@ -72,20 +72,20 @@ Abre `http://localhost:8000`.
 
 ## Stack
 
-| Capa | Tecnologia |
+| Capa | Tecnología |
 | --- | --- |
 | API | FastAPI + Uvicorn |
 | Agentes | OpenAI Responses API |
 | Memoria | PostgreSQL, pgvector/HNSW, FTS, JSONB |
 | Cache | Redis |
 | UI | `index.html` |
-| Automatizacion | crons + workflows |
+| Automatización | crons + workflows |
 | Canales | HTTP + Twilio/WhatsApp opcional |
 | Tools | archivos, comandos, docs, Playwright |
 
 No commitees `.env`, claves, dumps, screenshots privados ni memoria personal.
 
-## Configuracion Minima
+## Configuración Mínima
 
 ```env
 OPENAI_API_KEY=sk-...
@@ -102,7 +102,7 @@ MULTIAGENT_PG_SCHEMA=multiagente
 REDIS_URL=redis://localhost:6379
 ```
 
-Opcionales utiles: `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid`, `TWILIO_*`, `CRONS_PATH`, `WORKFLOW_PATH`, `USER_PREFERENCES_PATH`, `ALLOWED_WRITE_ROOTS`.
+Opcionales útiles: `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid`, `TWILIO_*`, `CRONS_PATH`, `WORKFLOW_PATH`, `USER_PREFERENCES_PATH`, `ALLOWED_WRITE_ROOTS`.
 
 ## Arranque Con Docker
 
@@ -126,14 +126,14 @@ playwright install chromium
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Si arrancas desde otro directorio, las rutas relativas de `.env` se resuelven respecto a la raiz del proyecto mediante `app_paths.py`.
+Si arrancas desde otro directorio, las rutas relativas de `.env` se resuelven respecto a la raíz del proyecto mediante `app_paths.py`.
 
 ## API
 
 ```http
 POST /chat
 Content-Type: application/json
-X-API-Key: <si CHAT_API_KEY esta definido>
+X-API-Key: <si CHAT_API_KEY está definido>
 ```
 
 ```json
@@ -145,7 +145,7 @@ X-API-Key: <si CHAT_API_KEY esta definido>
 }
 ```
 
-Tambien acepta `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
+También acepta `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
 
 - `GET /conversations`
 - `GET /conversations/{session_id}`
@@ -155,15 +155,15 @@ Tambien acepta `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
 
 ## Memoria
 
-La parte fuerte. Multi-Claw trata la memoria como historial consultable de ejecucion, no solo como notas o resumen inyectado.
+La parte fuerte. Multi-Claw trata la memoria como historial consultable de ejecución, no solo como notas o resumen inyectado.
 
-1. Divide texto conversacional en chunks semanticos.
+1. Divide texto conversacional en chunks semánticos.
 2. Genera embeddings con OpenAI.
 3. Guarda chunks en `multiagente.conversation_chunks`.
-4. Recupera por vector, keyword o hibrido.
-5. Baja a `conversations.context_jsonb` cuando hace falta literalidad o cronologia.
+4. Recupera por vector, keyword o híbrido.
+5. Baja a `conversations.context_jsonb` cuando hace falta literalidad o cronología.
 
-El workflow `working-dir/workflows/memory_retrieval_tutorial` documenta el playbook de retrieval: clasificar intencion, reducir espacio de busqueda, combinar FTS/vector/hibrido y abrir JSON solo cuando compensa.
+El workflow `working-dir/workflows/memory_retrieval_tutorial` documenta el playbook de retrieval: clasificar intención, reducir espacio de búsqueda, combinar FTS/vector/híbrido y abrir JSON solo cuando compensa.
 
 ## Tests
 
@@ -175,7 +175,7 @@ Los tests son unitarios. Conviene tener `OPENAI_API_KEY` definida aunque sea con
 
 ## Seguridad Antes De Compartir O Exponer
 
-Herramienta local con mucho poder. Antes de compartir: `CHAT_API_KEY`, CORS restringido, passwords cambiadas, Postgres/Redis no expuestos, `ALLOWED_WRITE_ROOTS` limitado y revision de `working-dir/`.
+Herramienta local con mucho poder. Antes de compartir: `CHAT_API_KEY`, CORS restringido, contraseñas cambiadas, Postgres/Redis no expuestos, `ALLOWED_WRITE_ROOTS` limitado y revisión de `working-dir/`.
 
 ## Mejoras Recomendadas
 
@@ -183,7 +183,7 @@ Herramienta local con mucho poder. Antes de compartir: `CHAT_API_KEY`, CORS rest
 - Modo `dev/prod` claro.
 - Healthcheck de API/DB/Redis/OpenAI.
 - CI con `python -m unittest` y build Docker.
-- Benchmarks formales de memoria: recall, precision, coste y temporalidad.
+- Benchmarks formales de memoria: recall, precisión, coste y temporalidad.
 - Hardening de tools, CORS, auth y permisos multiusuario.
 
 ## Estructura
