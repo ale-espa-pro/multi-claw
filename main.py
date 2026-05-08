@@ -3,6 +3,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
+from openai import DefaultAioHttpClient
 import os
 from dotenv import load_dotenv
 
@@ -30,7 +31,7 @@ app.add_middleware(
 )
 
 # ── Clients & Agent ──
-openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=5, timeout=1000)
+openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=5, timeout=1000,  http_client=DefaultAioHttpClient())
 conversation_store = PostgresConversationStore()
 memory_rag = MemoryRag(conversation_store=conversation_store)
 

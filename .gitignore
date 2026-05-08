@@ -2,6 +2,7 @@ conversation
 pruebas.ipynb
 pruebas.py
 RAG
+working-dir/
 .env
 .codex
 __pycache__/

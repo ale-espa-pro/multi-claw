@@ -24,6 +24,7 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
+from app_paths import get_allowed_write_roots, get_playwright_output_dir, get_user_preferences_path
 from tools.memoryTools.RAG_memory import MemoryRag
 from tools.memoryTools.semantic_splitter import count_tokens
 # ── Env / Clients / RAG ─────────────────────────────────────────────
@@ -31,7 +32,7 @@ from tools.memoryTools.semantic_splitter import count_tokens
 load_dotenv()
 RAG = MemoryRag()
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-user_preferences_path = os.getenv("USER_PREFERENCES_PATH", "/tmp/user_preferences.txt")
+user_preferences_path = get_user_preferences_path()
 
 # ── Constantes ───────────────────────────────────────────────────────
 
@@ -46,15 +47,7 @@ MAX_PLAYWRIGHT_SESSION_TIMEOUT = 2_700
 FILE_HASH_ALGORITHM = "md5"
 HASH_CHUNK_BYTES = 1024 * 1024
 
-ALLOWED_WRITE_ROOTS = [
-    os.path.expanduser("~/Downloads"),
-    os.path.expanduser("~/Documents"),
-    os.path.expanduser("~/Desktop"),
-    os.path.expanduser("~"),
-    "/mnt/d",
-    "/mnt/c",
-    "/tmp",
-]
+ALLOWED_WRITE_ROOTS = get_allowed_write_roots()
 
 BLOCKED_COMMANDS = {
     "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){", "fork",
@@ -84,6 +77,15 @@ SAFE_BUILTINS = {
 def _resolve_path(path: str) -> str:
     """Expande ~ y variables de entorno, luego resuelve a ruta absoluta."""
     return os.path.realpath(os.path.expandvars(os.path.expanduser(path)))
+
+
+def _is_under_allowed_root(real_path: str) -> bool:
+    real_path = os.path.realpath(real_path)
+    for root in ALLOWED_WRITE_ROOTS:
+        root_path = os.path.realpath(root)
+        if real_path == root_path or real_path.startswith(root_path + os.sep):
+            return True
+    return False
 
 
 def _file_hash(path: str) -> dict:
@@ -221,7 +223,7 @@ def action_write_file(body: dict) -> dict:
     # ✅ FIX: expandir ~ y $HOME antes de validar
     real_path = _resolve_path(path)
 
-    if not any(real_path.startswith(os.path.realpath(root)) for root in ALLOWED_WRITE_ROOTS):
+    if not _is_under_allowed_root(real_path):
         return {
             "success": False,
             "error": f"write not allowed outside: {ALLOWED_WRITE_ROOTS}",
@@ -261,7 +263,7 @@ def action_edit_file(body: dict) -> dict:
 
     real_path = _resolve_path(path)
 
-    if not any(real_path.startswith(os.path.realpath(root)) for root in ALLOWED_WRITE_ROOTS):
+    if not _is_under_allowed_root(real_path):
         return {
             "success": False,
             "error": f"edit not allowed outside: {ALLOWED_WRITE_ROOTS}",
@@ -645,7 +647,7 @@ def _truncate_text(text: str, max_chars: int) -> tuple[str, bool, int]:
 
 def _playwright_output_dir(body: dict) -> str:
     requested = (body.get("output_dir") or "").strip()
-    base = requested or os.getenv("PLAYWRIGHT_OUTPUT_DIR") or os.path.join("/tmp", "planner_playwright")
+    base = requested or get_playwright_output_dir()
     output_dir = _resolve_path(base)
     os.makedirs(output_dir, exist_ok=True)
     return output_dir

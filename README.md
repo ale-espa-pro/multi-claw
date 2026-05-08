@@ -15,7 +15,66 @@ Este repositorio no es todavia un producto empaquetado. Estas son las realidades
 - No se usa Qdrant en runtime.
 - Twilio es opcional, pero el router esta incluido en la app.
 - El sandbox de `run_python` usa APIs Linux (`resource`, `prctl`), asi que esta pensado para Linux/WSL/Docker.
-- Algunas rutas y prompts siguen siendo personales y deberian moverse a configuracion antes de un despliegue multiusuario.
+- Las rutas de trabajo salen de variables de entorno y, si no se configuran, usan `./working-dir` dentro del clone local.
+- Las herramientas locales pueden leer archivos y ejecutar comandos segun la configuracion del agente; no debe exponerse en Internet sin revisar seguridad.
+
+## Arranque Rapido Para Un Clone Nuevo
+
+El camino recomendado para otra persona es Docker Compose.
+
+1. Clonar el repositorio:
+
+```bash
+git clone <url-del-repo>
+cd multi-claw
+```
+
+2. Definir la clave de OpenAI:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+3. Levantar la app:
+
+```bash
+docker compose up --build
+```
+
+4. Abrir la UI:
+
+```text
+http://localhost:8000
+```
+
+Con Docker no hace falta instalar PostgreSQL, Redis ni Python localmente. Docker crea:
+
+- `app`: backend FastAPI y UI.
+- `db`: PostgreSQL con pgvector.
+- `redis`: cache y rate limits.
+- `planner-workspace`: volumen interno montado en `/tmp/planner`.
+
+Para uso local sin Docker, ver "Arranque Local Sin Docker".
+
+## Que Debe Configurar Cada Persona
+
+Obligatorio:
+
+- `OPENAI_API_KEY`: clave de OpenAI.
+
+Recomendado para uso privado/local:
+
+- `CHAT_API_KEY`: protege `/chat`, `/conversations` y endpoints de borrado con header `X-API-Key`.
+- `WORKING_PATH`: carpeta donde se guardan sesiones, crons, workflows, capturas y preferencias. Si no se define, usa `./working-dir`.
+
+Opcional:
+
+- PostgreSQL: `MULTIAGENT_PG_*`, si no se usa Docker.
+- Redis: `REDIS_URL`, si no se usa Docker.
+- Twilio: `TWILIO_*`, solo si se quiere WhatsApp.
+- Datos personales: `USER_SYSTEM`, `USER_PHONE`, `USER_EMAIL`. No son necesarios para arrancar.
+
+No se debe commitear `.env`, claves, dumps de base de datos, `working-dir/`, screenshots privados ni memoria personal.
 
 ## Arquitectura
 
@@ -70,7 +129,7 @@ MULTIAGENT_PG_PASSWORD=change-me
 MULTIAGENT_PG_SCHEMA=multiagente
 
 REDIS_URL=redis://localhost:6379
-WORKING_PATH=/tmp/planner
+WORKING_PATH=./working-dir
 ```
 
 Opcionales utiles:
@@ -102,9 +161,9 @@ TWILIO_MAX_REPLY_WORDS=250
 USER_SYSTEM=ubuntu-wsl2
 USER_PHONE=+34...
 USER_EMAIL=...
-USER_PREFERENCES_PATH=/tmp/planner/user_preferences.txt
-CRONS_PATH=/tmp/planner/crons
-WORKFLOW_PATH=/tmp/planner/workflows
+USER_PREFERENCES_PATH=./working-dir/memory/user_preferences.txt
+CRONS_PATH=./working-dir/crons
+WORKFLOW_PATH=./working-dir/workflows
 ```
 
 ## Arranque Con Docker
@@ -170,7 +229,7 @@ Instala dependencias minimas:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.docker.txt
+pip install -r requirements.txt
 playwright install chromium
 ```
 
@@ -179,6 +238,8 @@ Arranca:
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+Si arrancas desde otro directorio, las rutas relativas configuradas en `.env` se resuelven respecto a la raiz del proyecto cuando pasan por `app_paths.py`.
 
 ## API
 
@@ -247,10 +308,48 @@ Los tests actuales son unitarios y no requieren OpenAI real, Postgres ni Redis s
 Por como estan inicializados algunos clientes globales, hoy si conviene tener `OPENAI_API_KEY`
 definida aunque sea con un valor de desarrollo; los tests no hacen llamadas reales a OpenAI.
 
+## Seguridad Antes De Compartir O Exponer
+
+Este sistema debe tratarse como una herramienta local con mucho poder. Antes de pasarlo de uso personal a uso compartido o publico, revisar:
+
+- Definir siempre `CHAT_API_KEY` si la API es accesible desde otra maquina.
+- Mantener `TWILIO_VALIDATE_SIGNATURE=true` si se usa Twilio.
+- Configurar `TWILIO_ALLOWED_FROM` para aceptar solo numeros conocidos.
+- Cambiar contrasenas de desarrollo de Docker antes de usarlo fuera de local.
+- No publicar puertos de PostgreSQL y Redis si no son necesarios fuera del host.
+- Restringir CORS en `main.py`; `allow_origins=["*"]` es comodo para desarrollo, no para produccion.
+- Revisar agentes con herramientas de archivos/comandos antes de dar acceso a usuarios no confiables.
+- Mantener `ALLOWED_WRITE_ROOTS` limitado a carpetas de trabajo controladas si se despliega para terceros.
+- Rotar cualquier clave que haya estado en `.env`, logs, capturas o historial de terminal.
+- Revisar `working-dir/` antes de compartir la maquina o copiar volumenes: puede contener memoria, preferencias y archivos generados.
+
+## Mejoras Recomendadas
+
+Prioridad alta:
+
+- Crear `.env.example` sin secretos con las variables minimas y recomendadas.
+- Separar modo `dev` y modo `prod`: CORS, credenciales, puertos expuestos, logs y herramientas habilitadas.
+- Hacer que PostgreSQL y Redis no expongan puertos en Docker Compose salvo que se active explicitamente.
+- Anadir autenticacion mas fuerte si se comparte con mas usuarios: usuarios reales, sesiones, permisos por herramienta.
+- Auditar las herramientas de comando y escritura para que tengan allowlists mas estrictas por entorno.
+
+Prioridad media:
+
+- Crear healthcheck HTTP documentado para saber si API, DB, Redis y OpenAI estan configurados.
+- Anadir tests de arranque de configuracion para validar rutas, `.env` y defaults.
+- Documentar como hacer backup/restauracion de PostgreSQL y del volumen `planner-workspace`.
+- Convertir `requirements.docker.txt` y `requirements.txt` en una unica fuente o explicar claramente cuando usar cada uno.
+- Anadir CI con `python -m unittest` y una build de Docker.
+
+Prioridad baja:
+
+- Mejorar nombres y ortografia de prompts internos (`worflows`, `incovar`, etc.) sin cambiar comportamiento.
+- Crear una pequena pagina de diagnostico en la UI para mostrar API URL, auth activa y estado de servicios.
+- Documentar ejemplos de uso de `/chat`, Twilio y memoria con datos ficticios.
+
 ## Limitaciones Conocidas
 
-- `requirements.txt` historico viene de un entorno local grande. Para Docker/local limpio usa `requirements.docker.txt`.
-- Hay prompts con preferencias/rutas personales que conviene parametrizar antes de compartir el sistema.
+- Aunque las rutas base son portables, la memoria o preferencias existentes pueden contener rutas personales si vienen de un entorno anterior.
 - Redis aun esta acoplado al runner principal; conviene hacer fallback in-memory para todo el flujo, no solo Twilio.
 - La API general solo queda protegida si configuras `CHAT_API_KEY`.
 - CORS esta abierto (`*`) en `main.py`; bien para desarrollo, no ideal para produccion.
@@ -261,6 +360,7 @@ definida aunque sea con un valor de desarrollo; los tests no hacen llamadas real
 ```text
 .
 ├── main.py
+├── app_paths.py
 ├── index.html
 ├── agents/
 │   ├── agent_builder.py
@@ -284,5 +384,6 @@ definida aunque sea con un valor de desarrollo; los tests no hacen llamadas real
 ├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
+├── requirements.txt
 └── requirements.docker.txt
 ```

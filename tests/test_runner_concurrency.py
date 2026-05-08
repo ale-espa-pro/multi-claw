@@ -26,8 +26,22 @@ class _FakeAgentBuilder:
     def get_tools_for_agent(self, agent_name):
         return []
 
-    def uses_json_response(self, agent_name):
-        return False
+    def get_runner_config(self):
+        return {
+            "max_messages": 120,
+            "keep_after_reset": 10,
+            "max_iterations": 400,
+        }
+
+    def get_agent_max_iterations(self, agent_name):
+        return 10
+
+    def get_response_create_kwargs(self, agent_name):
+        return {
+            "model": "test-model",
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "parallel_tool_calls": False,
+        }
 
 
 class _InMemorySessionManager:

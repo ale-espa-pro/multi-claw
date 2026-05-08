@@ -252,7 +252,7 @@ total_tools = [
         "name": "save_preference",
         "description": """Gestiona preferencias del usuario en USER_PREFERENCES_PATH.
         Uso recomendado: action='add' con preference para añadir; action='delete' con old_text para eliminar;
-        action='replace' con old_text y new_text para modificar.""",
+        action='replace' con old_text y new_text para modificar. Estas son preferencias del usuario que se mostrará en ls futuros system prompts de los agentes""",
         "parameters": {
             "type": "object",
             "properties": {

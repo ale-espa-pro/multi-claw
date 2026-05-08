@@ -3,6 +3,13 @@ import os
 import re
 import time
 from dotenv import load_dotenv
+from app_paths import (
+    get_crons_path,
+    get_sessions_path,
+    get_user_preferences_path,
+    get_workflows_path,
+    get_working_path,
+)
 from agents.agent_prompts import base_prompts
 from tools.local_tools import dict_total_tools
 from tools.ticket_dispatcher import ticket_dispatcher
@@ -21,11 +28,26 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "agent_config.json")
 README_DESCRIPTION_MAX_CHARS = 20_000
 README_DESCRIPTION_MAX_WORDS = 100
 
+DEFAULT_AGENT_PARAMS = {
+    "model": "gpt-5.5",
+    "reasoning": {"effort": "medium", "summary": "auto"},
+    "parallel_tool_calls": False,
+    "max_iterations": 10,
+}
+DEFAULT_RUNNER_CONFIG = {
+    "max_messages": 120,
+    "keep_after_reset": 10,
+    "max_iterations": 400,
+}
+
 
 class AgentBuilder:
     def __init__(self, working_base: str | None = None):
-        self.working_base = working_base or os.environ.get("WORKING_PATH", "/tmp/planner/")
+        self._working_base_override = working_base is not None
+        self.working_base = working_base or get_working_path()
         self._agents: dict[str, dict] = {}
+        self._defaults: dict = dict(DEFAULT_AGENT_PARAMS)
+        self._runner_config: dict = dict(DEFAULT_RUNNER_CONFIG)
         self.main_agent: str | None = None
         self.dict_total_tools = dict_total_tools
         self.ticket_dispatcher = ticket_dispatcher
@@ -39,11 +61,36 @@ class AgentBuilder:
         tools: list[str],
         main: bool = False,
         json_response: bool = False,
+        model: str | None = None,
+        reasoning: dict | None = None,
+        parallel_tool_calls: bool | None = None,
+        max_iterations: int | None = None,
+        text: dict | None = None,
     ):
+        merged_reasoning = {
+            **dict(self._defaults.get("reasoning") or {}),
+            **dict(reasoning or {}),
+        }
+        if text is None and json_response:
+            text = {"format": {"type": "json_object"}}
+
         self._agents[name] = {
             "base_prompt": base_prompt,
             "tools": tools,
             "json_response": json_response,
+            "model": model or self._defaults.get("model"),
+            "reasoning": merged_reasoning,
+            "parallel_tool_calls": (
+                bool(parallel_tool_calls)
+                if parallel_tool_calls is not None
+                else bool(self._defaults.get("parallel_tool_calls", False))
+            ),
+            "max_iterations": (
+                int(max_iterations)
+                if max_iterations is not None
+                else int(self._defaults.get("max_iterations", 10))
+            ),
+            "text": text,
         }
         if main:
             self.main_agent = name
@@ -54,7 +101,22 @@ class AgentBuilder:
         with open(config_path) as f:
             configs = json.load(f)
 
+        self._runner_config = {
+            **DEFAULT_RUNNER_CONFIG,
+            **dict(configs.get("_runner") or {}),
+        }
+        self._defaults = {
+            **DEFAULT_AGENT_PARAMS,
+            **dict(configs.get("_defaults") or {}),
+        }
+        self._defaults["reasoning"] = {
+            **dict(DEFAULT_AGENT_PARAMS["reasoning"]),
+            **dict((configs.get("_defaults") or {}).get("reasoning") or {}),
+        }
+
         for name, cfg in configs.items():
+            if name.startswith("_"):
+                continue
             if name not in base_prompts:
                 continue
             self.register(
@@ -63,6 +125,11 @@ class AgentBuilder:
                 tools=cfg.get("tools", []),
                 main=cfg.get("main", False),
                 json_response=cfg.get("json_response", False),
+                model=cfg.get("model"),
+                reasoning=cfg.get("reasoning"),
+                parallel_tool_calls=cfg.get("parallel_tool_calls"),
+                max_iterations=cfg.get("max_iterations"),
+                text=cfg.get("text"),
             )
 
     # ── Properties for AgentRunner ──
@@ -78,9 +145,32 @@ class AgentBuilder:
     def uses_json_response(self, agent_name: str) -> bool:
         return self._agents[agent_name]["json_response"]
 
+    def get_runner_config(self) -> dict:
+        return dict(self._runner_config)
+
+    def get_agent_max_iterations(self, agent_name: str) -> int:
+        return int(self._agents[agent_name]["max_iterations"])
+
+    def get_response_create_kwargs(self, agent_name: str) -> dict:
+        cfg = self._agents[agent_name]
+        kwargs = {
+            "model": cfg["model"],
+            "reasoning": cfg["reasoning"],
+            "parallel_tool_calls": cfg["parallel_tool_calls"],
+        }
+        if cfg.get("text"):
+            kwargs["text"] = cfg["text"]
+        return kwargs
+
     def get_tools_for_agent(self, agent_name: str) -> list[dict]:
         """Return tool schemas for an agent's tool list."""
-        return [self.dict_total_tools[name] for name in self._agents[agent_name]["tools"]]
+        tools = []
+        for tool in self._agents[agent_name]["tools"]:
+            if isinstance(tool, dict):
+                tools.append(tool)
+            else:
+                tools.append(self.dict_total_tools[tool])
+        return tools
 
     # ── System prompt building ──
 
@@ -167,7 +257,7 @@ class AgentBuilder:
         return "\n".join(lines)
 
     def _worflows_section(self) -> str:
-        path = os.environ.get("WORKFLOW_PATH")
+        path = get_workflows_path(self.working_base) if self._working_base_override else get_workflows_path()
         if not path or not os.path.isdir(path):
             return ""
         workflow_names = self._list_task_directories(path)
@@ -176,7 +266,7 @@ class AgentBuilder:
         return f"Workflows creados:\n{workflow_names}\n"
 
     def _crons_section(self) -> str:
-        path = os.environ.get("CRONS_PATH")
+        path = get_crons_path(self.working_base) if self._working_base_override else get_crons_path()
         if not path or not os.path.isdir(path):
             return ""
         cron_list = self._list_task_directories(path)
@@ -190,7 +280,7 @@ class AgentBuilder:
 
     @staticmethod
     def _preferences_section() -> str:
-        path = os.environ.get("USER_PREFERENCES_PATH")
+        path = get_user_preferences_path()
         if not path or not os.path.exists(path):
             return ""
         with open(path, "r") as f:
@@ -210,19 +300,23 @@ class AgentBuilder:
             return "Esta conversación es temporal. No se almacenará memoria ni archivos."
 
         if conversation_type == "cron":
-            base_dir = os.path.join(self.working_base, "crons")
+            base_dir = get_crons_path(self.working_base) if self._working_base_override else get_crons_path()
         else:
-            base_dir = os.path.join(self.working_base, "sessions")
+            base_dir = get_sessions_path(self.working_base)
 
         working_dir = os.path.join(base_dir, session_id)
         os.makedirs(working_dir, exist_ok=True)
+        sessions_path = get_sessions_path(self.working_base)
+        crons_path = get_crons_path(self.working_base) if self._working_base_override else get_crons_path()
+        workflows_path = get_workflows_path(self.working_base) if self._working_base_override else get_workflows_path()
 
         return (
             "## Entorno de ejecución ##\n"
-            "Todas los directorios de conversaciones e interacciones creadas a lo largo de la historia viven en /home/ale/multi-claw/sessions/*.\n"
-            "cada carpeta tiene asigando como nombre un conversation_id que está asociado en la DB de cada conversación previa con agentes \n"
-            "dentro de /home/ale/multi-claw/cron-agents se encuentran todas los directorios de tareas programadas de agentes con sus archivos, resultados etc \n"
-            "dentro de /home/ale/multi-claw/workflows se encuentran todos los flujos de trabajo creados por agentes similar a agent-crons pero estas se ejecutan cuando el usuario lo solicita. \n"
+            f"Raíz de trabajo: {self.working_base}\n"
+            f"Sesiones: {sessions_path}\n"
+            f"Crons: {crons_path}\n"
+            f"Workflows: {workflows_path}\n"
+            "Cada carpeta de sesión usa un conversation_id asociado a la base de datos.\n"
             f"**Directorio de trabajo: {working_dir}**\n"
-            "Cualquier archivo, datos o resultados de la sesión actual se almacenará por defecto en esta carpeta con subcarpetas si es necesario. En caso de que sea necesario siempre se podra modificar cualquier otros directorios mientras esté permitido"
+            "Cualquier archivo, dato o resultado de la sesión actual se almacenará por defecto en esta carpeta con subcarpetas si es necesario."
         )

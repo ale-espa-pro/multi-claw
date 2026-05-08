@@ -641,7 +641,7 @@ createApp({
     data() {
         return {
             config: {
-                apiUrl: localStorage.getItem("apiUrl") || "http://localhost:8000",
+                apiUrl: localStorage.getItem("apiUrl") || window.location.origin,
                 sessionId: localStorage.getItem("sessionId") || genId(),
                 username: localStorage.getItem("username") || "",
                 metadata: localStorage.getItem("metadata") || "{}"

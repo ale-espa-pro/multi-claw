@@ -70,9 +70,10 @@ class AgentRunner:
         self.main_agent = agent_builder.main_agent
         self.agent_names = agent_builder.agent_names
 
-        self.max_messages = 120
-        self.keep_after_reset = 10
-        self.max_iterations = 400
+        runner_config = agent_builder.get_runner_config()
+        self.max_messages = int(runner_config["max_messages"])
+        self.keep_after_reset = int(runner_config["keep_after_reset"])
+        self.max_iterations = int(runner_config["max_iterations"])
         self.memory_retrieval_limit = self._normalize_retrieval_limit(
             os.getenv("MEMORY_RETRIEVAL_LIMIT", "5")
         )
@@ -659,24 +660,13 @@ class AgentRunner:
             agent_name, exec_ctx.session_id, exec_ctx.conversation_type
         )
         messages = [{"role": "system", "content": system_prompt}] + self._prepare_context_for_api(curr_context)
-        kwargs: dict[str, Any] = {}
-
-        if agent_name in ["web_search_agent", "ResearchAgent", "WebSearchAgent"]:
-            curr_agent_tools = [{"type": "web_search"}]
-        else:
-            curr_agent_tools = self.agent_builder.get_tools_for_agent(agent_name)
-            kwargs["parallel_tool_calls"] = False
-
-            if self.agent_builder.uses_json_response(agent_name):
-                kwargs["text"] = {"format": {"type": "json_object"}}
-                kwargs["parallel_tool_calls"] = True
+        curr_agent_tools = self.agent_builder.get_tools_for_agent(agent_name)
+        kwargs = self.agent_builder.get_response_create_kwargs(agent_name)
 
         async with self._api_semaphore:
             response = await self.client.responses.create(
-                model="gpt-5.4",
                 input=messages,
                 tools=curr_agent_tools,
-                reasoning={"effort": "high", "summary": "auto"},
                 **kwargs,
             )
 
@@ -733,8 +723,9 @@ class AgentRunner:
         agent_name: str,
         task_description: Any,
         exec_ctx: "ExecutionContext",
-        max_iterations: int = 10,
+        max_iterations: int | None = None,
     ):
+        max_iterations = max_iterations or self.agent_builder.get_agent_max_iterations(agent_name)
         raw_user_text = self._serialize_user_payload(task_description)
         exec_ctx.context[agent_name].append(self._build_user_message_item(raw_user_text))
         self._truncate_context_if_needed(agent_name, exec_ctx)

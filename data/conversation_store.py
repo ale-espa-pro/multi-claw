@@ -21,7 +21,7 @@ class PostgresConversationStore:
     ):
         self.host = host or os.getenv("MULTIAGENT_PG_HOST", "127.0.0.1")
         self.port = port or int(os.getenv("MULTIAGENT_PG_PORT", "5432"))
-        self.database = database or os.getenv("MULTIAGENT_PG_DB", "web")
+        self.database = database or os.getenv("MULTIAGENT_PG_DB", "multiagente")
         self.user = user or os.getenv("MULTIAGENT_PG_USER", "admin")
         self.password = password or os.getenv("MULTIAGENT_PG_PASSWORD")
         raw_schema = os.getenv("MULTIAGENT_PG_SCHEMA", "multiagente")
