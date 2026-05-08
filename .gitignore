@@ -3,6 +3,16 @@ pruebas.ipynb
 pruebas.py
 RAG
 working-dir/
+!working-dir/
+working-dir/*
+!working-dir/workflows/
+working-dir/workflows/*
+!working-dir/workflows/memory_retrieval_tutorial/
+working-dir/workflows/memory_retrieval_tutorial/*
+!working-dir/workflows/memory_retrieval_tutorial/README.md
+!working-dir/workflows/memory_retrieval_tutorial/PLAYBOOK.md
+!working-dir/workflows/memory_retrieval_tutorial/AGENT_PROMPT.md
+!working-dir/workflows/memory_retrieval_tutorial/QUERY_TEMPLATES.sql
 .env
 .codex
 __pycache__/

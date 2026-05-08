@@ -4,6 +4,23 @@ Multi-Claw es un backend experimental de orquestacion multiagente con FastAPI, O
 
 El proyecto esta orientado a uso personal/local, pero ya incluye piezas para funcionar como servicio: API HTTP, UI HTML simple, webhook de Twilio/WhatsApp, herramientas locales de archivos/comandos, memoria semantica por embeddings y busqueda textual.
 
+## Por Que Es Interesante
+
+Multi-Claw explora una idea simple: que un asistente local sea mas util si no depende de un unico hilo gigante de contexto, sino de una red de agentes especializados, memoria consultable y workflows reutilizables.
+
+Lo mas potente del proyecto:
+
+- **Agentes autoprogramables:** se pueden crear tareas autonomas periodicas, tipo cron, donde uno o varios agentes se autoinvocan, revisan estado, producen artefactos y dejan trazabilidad.
+- **Menos context rotting:** la arquitectura multiagente reparte responsabilidades para evitar que una sola conversacion se degrade al crecer.
+- **Control de costes:** permite delegar subtareas a subagentes mas baratos o con menor razonamiento cuando no hace falta usar el modelo mas potente para todo.
+- **Mejor aislamiento ante prompt injection:** no es una defensa determinista, pero separar agentes, contratos, herramientas y memoria reduce parte de la superficie frente a mezclarlo todo en un unico contexto.
+- **Memoria de acciones completas:** la memoria no solo guarda mensajes; tambien puede recuperar acciones, outputs de herramientas, subagentes, contratos entre agentes, rutas, estados, errores y decisiones.
+- **Retrieval complejo y multitemporal:** el sistema puede buscar por sesiones, subagentes, tipo de evento, chunks semanticos, texto literal, ventanas temporales y fallback a `context_jsonb`.
+- **Workflows como habilidades reutilizables:** los workflows guardan playbooks, prompts y plantillas para que futuros agentes repitan procesos con contexto operativo.
+- **Preferencias de usuario persistentes:** el sistema puede inyectar preferencias y metadatos personales de forma controlada cuando estan configurados.
+
+En pruebas internas de uso real, el enfoque de memoria ha dado un recall muy alto en corpus conversacionales grandes, incluso por encima de 20 millones de tokens. Falta convertir esa observacion en benchmarks formales, asi que debe leerse como una direccion prometedora, no como una garantia medida.
+
 ## Estado Real
 
 Este repositorio no es todavia un producto empaquetado. Estas son las realidades importantes:
@@ -107,6 +124,8 @@ AgentRunner
 - Lectura de TXT, Markdown, JSON, CSV, PDF, DOCX, XLSX y PPTX.
 - Navegacion web con Playwright.
 - Webhook Twilio/WhatsApp con validacion de firma, allowlist, rate limit e idempotencia.
+- Workflows reutilizables para procesos recurrentes o habilidades operativas.
+- Agentes cron/autonomos capaces de ejecutar tareas periodicas con estado y trazabilidad.
 - Memoria conversacional persistente:
   - chunks semanticos con `text-embedding-3-large`
   - almacenamiento en PostgreSQL
@@ -298,6 +317,15 @@ Si una tool se quiere exponer a un agente, se anade tambien en `agents/agent_con
 
 La tabla usa columna `embedding halfvec(3072)` si pgvector esta disponible. Si no lo esta, se usa `JSONB` y la busqueda vectorial devuelve vacio.
 
+El workflow versionado `working-dir/workflows/memory_retrieval_tutorial` documenta como consultar esa memoria con buena relacion señal/tokens:
+
+- clasificar primero la intencion de la consulta
+- usar `conversation_chunks` como indice semantico/operativo
+- reducir el espacio de busqueda antes de abrir contexto grande
+- priorizar 1 resultado por sesion en primeras pasadas
+- combinar filtros textuales, prefijos, FTS/BM25-like, vectorial e hibrida
+- abrir `conversations.context_jsonb` solo para literal exacto, atribucion o cronologia fiel
+
 ## Tests
 
 ```bash
@@ -332,6 +360,7 @@ Prioridad alta:
 - Hacer que PostgreSQL y Redis no expongan puertos en Docker Compose salvo que se active explicitamente.
 - Anadir autenticacion mas fuerte si se comparte con mas usuarios: usuarios reales, sesiones, permisos por herramienta.
 - Auditar las herramientas de comando y escritura para que tengan allowlists mas estrictas por entorno.
+- Formalizar benchmarks de memoria: recall, precision, coste por query y comportamiento con multiples temporalidades.
 
 Prioridad media:
 
@@ -382,6 +411,9 @@ Prioridad baja:
 │   └── twilio/
 │       └── router.py
 ├── tests/
+├── working-dir/
+│   └── workflows/
+│       └── memory_retrieval_tutorial/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
