@@ -27,6 +27,7 @@ class PostgresConversationStore:
         raw_schema = os.getenv("MULTIAGENT_PG_SCHEMA", "multiagente")
         self.schema = re.sub(r"[^a-zA-Z0-9_]", "", raw_schema) or "multiagente"
         self.main_agent = os.getenv("MULTIAGENT_MAIN_AGENT", "ExecutorAgent")
+        self.pool_timeout = float(os.getenv("MULTIAGENT_PG_POOL_TIMEOUT", "20"))
         self.pool: AsyncConnectionPool | None = None
         self.vector_enabled = False
 
@@ -54,9 +55,11 @@ class PostgresConversationStore:
                 conninfo=self.conninfo,
                 min_size=1,
                 max_size=5,
+                timeout=self.pool_timeout,
                 open=False,
             )
             await self.pool.open()
+            await self.pool.wait(timeout=self.pool_timeout)
 
     async def close(self):
         if self.pool is not None:

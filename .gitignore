@@ -14,6 +14,7 @@ working-dir/workflows/memory_retrieval_tutorial/*
 !working-dir/workflows/memory_retrieval_tutorial/AGENT_PROMPT.md
 !working-dir/workflows/memory_retrieval_tutorial/QUERY_TEMPLATES.sql
 .env
+docker-compose.local.yml
 .codex
 __pycache__/
 *.py[cod]

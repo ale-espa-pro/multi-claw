@@ -1,0 +1,30 @@
+# Optional standalone compose file for using Postgres/Redis already running
+# on the host machine. Copy to docker-compose.local.yml, adjust .env, then run:
+# docker compose -f docker-compose.local.yml up --build
+services:
+  app:
+    build: .
+    network_mode: host
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      MULTIAGENT_PG_HOST: ${DOCKER_MULTIAGENT_PG_HOST:-127.0.0.1}
+      MULTIAGENT_PG_PORT: ${DOCKER_MULTIAGENT_PG_PORT:-5432}
+      MULTIAGENT_PG_DB: ${DOCKER_MULTIAGENT_PG_DB:-web}
+      MULTIAGENT_PG_USER: ${DOCKER_MULTIAGENT_PG_USER:-admin}
+      MULTIAGENT_PG_PASSWORD: ${DOCKER_MULTIAGENT_PG_PASSWORD:?DOCKER_MULTIAGENT_PG_PASSWORD is required}
+      MULTIAGENT_PG_SCHEMA: ${MULTIAGENT_PG_SCHEMA:-multiagente}
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://127.0.0.1:6379}
+      WORKING_PATH: /app/working-dir
+      USER_PREFERENCES_PATH: /app/working-dir/memory/user_preferences.txt
+      SESSIONS_PATH: /app/working-dir/sessions
+      CRONS_PATH: /app/working-dir/cron-agents
+      WORKFLOW_PATH: /app/working-dir/workflows
+      ALLOWED_WRITE_ROOTS: /app/working-dir,/tmp
+      TWILIO_VALIDATE_SIGNATURE: ${TWILIO_VALIDATE_SIGNATURE:-true}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_ALLOWED_FROM: ${TWILIO_ALLOWED_FROM:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
+    volumes:
+      - ${WORKING_PATH_HOST:-./working-dir}:/app/working-dir

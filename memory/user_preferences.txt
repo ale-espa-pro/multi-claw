@@ -1,0 +1,1 @@
+ -Cuando se vaya a consultar algo de la memoria, usar siempre el tutorial/herramienta de memoria disponible (memory_query) antes de responder.

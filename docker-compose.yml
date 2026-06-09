@@ -2,20 +2,22 @@ services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
-      MULTIAGENT_PG_HOST: db
-      MULTIAGENT_PG_PORT: "5432"
-      MULTIAGENT_PG_DB: multiagente
-      MULTIAGENT_PG_USER: admin
-      MULTIAGENT_PG_PASSWORD: multi-claw-dev
-      MULTIAGENT_PG_SCHEMA: multiagente
-      REDIS_URL: redis://redis:6379
-      WORKING_PATH: /tmp/planner
-      USER_PREFERENCES_PATH: /tmp/planner/user_preferences.txt
-      CRONS_PATH: /tmp/planner/crons
-      WORKFLOW_PATH: /tmp/planner/workflows
+      MULTIAGENT_PG_HOST: ${DOCKER_MULTIAGENT_PG_HOST:-db}
+      MULTIAGENT_PG_PORT: ${DOCKER_MULTIAGENT_PG_PORT:-5432}
+      MULTIAGENT_PG_DB: ${DOCKER_MULTIAGENT_PG_DB:-multiagente}
+      MULTIAGENT_PG_USER: ${DOCKER_MULTIAGENT_PG_USER:-admin}
+      MULTIAGENT_PG_PASSWORD: ${DOCKER_MULTIAGENT_PG_PASSWORD:-multi-claw-dev}
+      MULTIAGENT_PG_SCHEMA: ${MULTIAGENT_PG_SCHEMA:-multiagente}
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://redis:6379}
+      WORKING_PATH: /app/working-dir
+      USER_PREFERENCES_PATH: /app/working-dir/memory/user_preferences.txt
+      SESSIONS_PATH: /app/working-dir/sessions
+      CRONS_PATH: /app/working-dir/cron-agents
+      WORKFLOW_PATH: /app/working-dir/workflows
+      ALLOWED_WRITE_ROOTS: /app/working-dir,/tmp
       TWILIO_VALIDATE_SIGNATURE: ${TWILIO_VALIDATE_SIGNATURE:-true}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
@@ -23,7 +25,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       CHAT_API_KEY: ${CHAT_API_KEY:-}
     volumes:
-      - planner-workspace:/tmp/planner
+      - ${WORKING_PATH_HOST:-./working-dir}:/app/working-dir
     depends_on:
       db:
         condition: service_healthy
@@ -33,11 +35,11 @@ services:
   db:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: multiagente
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: multi-claw-dev
+      POSTGRES_DB: ${DOCKER_MULTIAGENT_PG_DB:-multiagente}
+      POSTGRES_USER: ${DOCKER_MULTIAGENT_PG_USER:-admin}
+      POSTGRES_PASSWORD: ${DOCKER_MULTIAGENT_PG_PASSWORD:-multi-claw-dev}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PUBLIC_PORT:-5433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -48,8 +50,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -61,4 +61,3 @@ services:
 volumes:
   postgres-data:
   redis-data:
-  planner-workspace:

@@ -1,10 +1,13 @@
 # main.py
+import asyncio
+import logging
+import os
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
 from openai import DefaultAioHttpClient
-import os
 from dotenv import load_dotenv
 
 from agents.agent_builder import AgentBuilder
@@ -21,6 +24,7 @@ from integrations.twilio.router import router as twilio_router, set_agent_runner
 # ── Setup ──
 load_dotenv()
 
+logger = logging.getLogger(__name__)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -60,8 +64,27 @@ app.include_router(twilio_router)
 # ── Lifecycle ──
 @app.on_event("startup")
 async def startup_event():
-    await conversation_store.connect()
-    await conversation_store.init_schema()
+    max_attempts = int(os.getenv("MULTIAGENT_PG_STARTUP_ATTEMPTS", "6"))
+    delay_seconds = float(os.getenv("MULTIAGENT_PG_STARTUP_RETRY_SECONDS", "2"))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await conversation_store.connect()
+            await conversation_store.init_schema()
+            return
+        except Exception:
+            await conversation_store.close()
+            if attempt == max_attempts:
+                raise
+            logger.warning(
+                "Database startup attempt %s/%s failed; retrying in %.1f seconds",
+                attempt,
+                max_attempts,
+                delay_seconds,
+                exc_info=True,
+            )
+            await asyncio.sleep(delay_seconds)
+            delay_seconds = min(delay_seconds * 2, 10)
 
 
 @app.on_event("shutdown")

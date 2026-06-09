@@ -106,8 +106,18 @@ Opcionales útiles: `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid`, `TWILIO_*`, `
 
 ## Arranque Con Docker
 
+Para una instalación nueva, copia `.env.example` a `.env`, rellena `OPENAI_API_KEY` y arranca:
+
 ```bash
 docker compose up --build
+```
+
+Esto crea Postgres y Redis en contenedores, monta `./working-dir` en la app y expone la API en `http://localhost:8000`.
+
+Si quieres usar Postgres/Redis ya existentes en tu host, copia `docker-compose.host-db.example.yml` a `docker-compose.local.yml`, ajusta las variables `DOCKER_MULTIAGENT_PG_*` en `.env` y arranca con:
+
+```bash
+docker compose -f docker-compose.local.yml up --build
 ```
 
 Para parar:
