@@ -234,6 +234,28 @@ Patrón:
 - Si quieres **eventos reales**, no deduzcas el conteo desde la shortlist por sesión: cuenta los eventos concretos en el subconjunto filtrado.
 - La deduplicación por sesión sirve para triage, no para contar todos los outputs de una sesión.
 
+### Conteo directo de escrituras, ediciones y cambios de archivos
+
+- Si el usuario pregunta por **modificaciones, creaciones o cambios de archivos/workflows**, antes de abrir contexto grande filtra directamente `conversation_chunks` por herramientas/eventos específicos: `function_call write_file`, `function_call edit_file`, `bytes_written`, `replacements`, `file_hash`, y por la ruta o slug del workflow/proyecto objetivo.
+- Si los cambios pueden hacerse mediante un CLI propio del workflow, incluye también el comando/patrón específico y su workdir/ruta, por ejemplo `vault.py set` dentro del slug `personal_data_vault`, sin valores sensibles.
+- Cuando la pregunta sea sobre historial pasado, excluye explícitamente la sesión actual (`session_id <> '<CURRENT_SESSION_ID>'`) para no contar ecos, resúmenes o la investigación en curso.
+- Cuenta **llamadas reales de escritura/edición** o hashes cambiados. No cuentes menciones, planes, summaries, snippets derivados ni explicaciones que repitan una acción.
+- Abre `context_jsonb` solo de forma puntual si el chunk candidato no permite confirmar que hubo acción real o si necesitas resolver ambigüedad entre plan y ejecución.
+- Los aprendizajes de filtrado y conteo van en este workflow (`PLAYBOOK.md`/`QUERY_TEMPLATES.sql`), **no en `save_preference`**, salvo que sean una preferencia estable real del usuario.
+
+## Dónde guardar aprendizajes de retrieval
+
+- Usa `save_preference` solo para **preferencias estables del usuario**: idioma, canales, horarios, criterios persistentes o datos personales permitidos.
+- Las mejoras de filtrado, errores frecuentes, casos de uso y heurísticas operativas deben documentarse en este workflow: `PLAYBOOK.md` para reglas, `QUERY_TEMPLATES.sql` para patrones SQL y `README.md` si cambia el uso general.
+- No conviertas cada evaluación puntual de retrieval en preferencia. Si un caso enseña una técnica reusable, sintetízala aquí como regla operativa.
+- Para **conteos de eventos reales**, separa siempre:
+  1. localización de sesiones/chunks candidatos;
+  2. verificación en fuente fiable (`context_jsonb` puntual, artefactos estructurados o logs originales);
+  3. deduplicación por una clave estable y específica del dominio.
+- Evita contar como eventos reales simples menciones, resúmenes o chunks sin evidencia verificable. Si no hay clave estable, reporta confirmados vs ambiguos y no inventes un total automático.
+- Ejemplos breves de claves estables: job id o documento+timestamp en acciones de sistema; `message_id`/`threadId` en correos; id de transacción, id de tarea o ruta+hash en artefactos. Separa cuando convenga conteo amplio (`scanned/listed/candidato`) y conteo estricto (`selected/executed/downloaded/confirmado`).
+- Si un agregado indica elementos no listados (`messages_scanned`, `n_results`, `total_found`, etc.), decláralo y decide explícitamente si representa total fiable, límite inferior o señal incompleta.
+
 ## Uso de retrieval automático
 
 Trata el **EXTRA DE MEMORIA AUTOMÁTICA** como una pista:
@@ -263,6 +285,7 @@ Ahí están las plantillas para:
 - archivos/resultados/artefactos
 - estado/progreso
 - vectorial híbrida sobre subconjunto filtrado
+- conteo de eventos reales deduplicados por clave estable
 - fingerprint agregado por sesión
 
 ## Recomendación operativa final

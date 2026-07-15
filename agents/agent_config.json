@@ -5,7 +5,7 @@
         "max_iterations": 400
     },
     "_defaults": {
-        "model": "gpt-5.5",
+        "model": "gpt-5.6",
         "reasoning": {
             "effort": "medium",
             "summary": "auto"
@@ -20,7 +20,7 @@
     },
     "WebSearchAgent": {
         "tools": [{"type": "web_search"}],
-        "json_response": true,
+        "json_response": false,
         "parallel_tool_calls": true,
         "model": "gpt-5.4"
     },

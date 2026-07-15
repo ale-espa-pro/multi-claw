@@ -109,7 +109,121 @@ LIMIT 10;
 -- Ajusta la cadena de websearch_to_tsquery según el objetivo literal.
 
 -- =====================================================
--- 8) Fingerprint agregado por sesión
+-- 8) Conteo de eventos reales deduplicados por clave estable
+-- Patrón seguro:
+--   1) candidate_sessions: localizar sesiones probables con filtros baratos.
+--   2) candidate_chunks: reunir evidencias candidatas, sin contar todavía.
+--   3) verified_events: extraer SOLO claves explícitas y específicas del dominio.
+-- Si no existe clave estable, NO hagas fallback heurístico para contar;
+-- abre context_jsonb/artefactos/logs puntuales y reporta confirmados vs ambiguos.
+--
+-- Ajusta SIEMPRE estos placeholders antes de ejecutar:
+--   <DOMAIN_TERMS>       términos del dominio: 'deploy|invoice|gmail|print|...'
+--   <EVENT_KEY_REGEX>    regex específico con 1 grupo capturando la clave estable.
+-- Ejemplos orientativos, no universales:
+--   '(?:job_id|job id)[:= ]+([0-9]+)'
+--   '(?:message_id|gmail_message_id|threadId)[:= \"'']+([A-Za-z0-9_-]+)'
+--   '(?:transaction_id|task_id|run_id)[:= \"'']+([A-Za-z0-9_-]+)'
+-- Evita regex genéricas tipo '\bid\b' sin prefijo de dominio: suelen ser ruido.
+-- =====================================================
+WITH candidate_sessions AS (
+  SELECT DISTINCT session_id
+  FROM multiagente.conversation_chunks
+  WHERE chunck ~* '<DOMAIN_TERMS>'
+  ORDER BY session_id
+  LIMIT 50
+), candidate_chunks AS (
+  SELECT cc.session_id, cc.message_order, cc.chunck
+  FROM multiagente.conversation_chunks cc
+  JOIN candidate_sessions cs USING (session_id)
+  WHERE cc.chunck ~* '<DOMAIN_TERMS>'
+    AND cc.chunck ~* '<EVENT_KEY_REGEX>'
+), verified_events AS (
+  SELECT
+    session_id,
+    message_order,
+    (regexp_match(chunck, '<EVENT_KEY_REGEX>', 'i'))[1] AS event_key,
+    LEFT(chunck, 220) AS sample
+  FROM candidate_chunks
+  WHERE regexp_match(chunck, '<EVENT_KEY_REGEX>', 'i') IS NOT NULL
+)
+SELECT COUNT(DISTINCT event_key) AS distinct_verified_events,
+       COUNT(*) AS evidence_rows,
+       COUNT(DISTINCT session_id) AS sessions_touched
+FROM verified_events;
+
+-- Auditoría recomendada antes de responder:
+-- SELECT event_key, COUNT(*) AS n, array_agg(DISTINCT session_id) AS sessions, max(sample) AS sample
+-- FROM verified_events GROUP BY event_key ORDER BY n DESC LIMIT 50;
+--
+-- Si verified_events queda vacío o incompleto, usa candidate_sessions/candidate_chunks
+-- solo como shortlist y abre fuentes puntuales. No sustituyas una clave ausente por md5(chunk).
+
+-- =====================================================
+-- 9) Conteo directo de escrituras por herramienta + ruta objetivo
+-- Objetivo: contar cambios reales en archivos/workflows sin abrir context_jsonb grande.
+-- Ajusta SIEMPRE:
+--   <CURRENT_SESSION_ID>      sesión actual a excluir si se pregunta por historial pasado.
+--   <TARGET_PATH_OR_SLUG>     ruta o slug objetivo, ej. personal_data_vault.
+--   <SINCE_TIMESTAMP>         fecha inferior opcional; usa '1970-01-01' si no aplica.
+--
+-- Señales incluidas:
+--   - function_call write_file / edit_file
+--   - bytes_written / replacements / file_hash
+--   - CLI específico tipo vault.py set cuando el workflow lo permita
+-- No cuenta menciones genéricas: exige señal de herramienta/evento + ruta/slug objetivo.
+-- Si queda duda entre plan y ejecución, abre context_jsonb solo para esas sesiones.
+-- =====================================================
+WITH candidate_chunks AS (
+  SELECT
+    session_id,
+    message_order,
+    created_at,
+    chunck
+  FROM multiagente.conversation_chunks
+  WHERE session_id <> '<CURRENT_SESSION_ID>'
+    AND created_at >= TIMESTAMPTZ '<SINCE_TIMESTAMP>'
+    AND chunck ~* '<TARGET_PATH_OR_SLUG>'
+    AND (
+      chunck ~* 'function_call[^\n]*(write_file|edit_file)'
+      OR chunck ~* 'bytes_written|replacements|file_hash'
+      OR chunck ~* 'vault\.py[[:space:]]+set'
+    )
+    AND NOT (chunck ~* '(plan|planned|snippet|summary|resumen|mención|mencion|deber[ií]a|voy a|would)'
+             AND chunck !~* 'function_output|replacements|bytes_written|file_hash')
+), classified AS (
+  SELECT
+    session_id,
+    message_order,
+    created_at,
+    CASE
+      WHEN chunck ~* 'function_call[^\n]*write_file|bytes_written' THEN 'write_file'
+      WHEN chunck ~* 'function_call[^\n]*edit_file|replacements' THEN 'edit_file'
+      WHEN chunck ~* 'vault\.py[[:space:]]+set' THEN 'workflow_cli_set'
+      WHEN chunck ~* 'file_hash' THEN 'hash_evidence'
+      ELSE 'other_write_signal'
+    END AS event_kind,
+    LEFT(chunck, 260) AS sample
+  FROM candidate_chunks
+)
+SELECT
+  event_kind,
+  COUNT(*) AS evidence_rows,
+  COUNT(DISTINCT session_id) AS sessions_touched,
+  MIN(created_at) AS first_seen,
+  MAX(created_at) AS last_seen
+FROM classified
+GROUP BY event_kind
+ORDER BY last_seen DESC, evidence_rows DESC;
+
+-- Auditoría puntual:
+-- SELECT session_id, message_order, created_at, event_kind, sample
+-- FROM classified
+-- ORDER BY created_at DESC, message_order DESC
+-- LIMIT 80;
+
+-- =====================================================
+-- 10) Fingerprint agregado por sesión
 -- =====================================================
 WITH typed AS (
   SELECT
