@@ -1,102 +1,8 @@
 total_tools = [
     {
         "type": "function",
-        "name": "search_files",
-        "description": "Search files recursively using fuzzy matching against filenames. Returns total_matches and remaining_results when limit hides matches.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "multiple mixed search queries for maximal generalization"
-                },
-                "root": {
-                    "type": "string",
-                    "description": "Root directory"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results +100 recommended. The result includes remaining_results for hidden matches."
-                }
-            }
-        },
-        "required": ["query"]
-    },
-    {
-        "type": "function",
-        "name": "list_mcps",
-        "description": "Muestra los MCPs disponibles y su configuración",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Que se desea buscar en almacenamiento de MCPs"
-                }
-            }
-        },
-        "required": ["query"]
-    },
-    {
-        "type": "function",
-        "name": "create_simple_cron",
-        "description": """Esta herramienta se usará cuando el usuario quiera ejecutar una acción o consulta en un día
-        determinado o de forma reiterada""",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plan": {
-                    "type": "string",
-                    "description": "La acción contextualizada que se desea realizar (No se debe mencionar nada de que sea una tarea programada)"
-                },
-                "date": {
-                    "type": "string",
-                    "description": "Los datos o posibles intenciones/acciones que se quieran buscar en la memoria del agente"
-                },
-                "specificity": {
-                    "type": "string",
-                    "description": "Número entre 1 y 5 que describa si se tiene muy claro que se tiene que consultar 5 y a menos específico bajará hasta 1"
-                },
-                "type": {
-                    "type": "string",
-                    "description": "Si está claro se debe aclarar si la consulta es sobre una de las siguientes opciones: preference|action|info"
-                }
-            }
-        },
-        "required": ["query"]
-    },
-    {
-        "type": "function",
-        "name": "create_agent_cron",
-        "description": """Esta herramienta se usará cuando el usuario quiera ejecutar una acción o consulta en un día
-        determinado o de forma reiterada""",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "plan": {
-                    "type": "string",
-                    "description": "La acción contextualizada que se desea realizar (No se debe mencionar nada de que sea una tarea programada)"
-                },
-                "date": {
-                    "type": "string",
-                    "description": "Los datos o posibles intenciones/acciones que se quieran buscar en la memoria del agente"
-                },
-                "specificity": {
-                    "type": "string",
-                    "description": "Número entre 1 y 5 que describa si se tiene muy claro que se tiene que consultar 5 y a menos específico bajará hasta 1"
-                },
-                "type": {
-                    "type": "string",
-                    "description": "Si está claro se debe aclarar si la consulta es sobre una de las siguientes opciones: preference|action|info"
-                }
-            }
-        },
-        "required": ["query"]
-    },
-    {
-        "type": "function",
         "name": "write_file",
-        "description": "Crea o escribe contenido en un archivo de texto. Devuelve file_hash md5 del estado final. USAR SIEMPRE para crear archivos en vez de run_python. Rutas permitidas: ~/Downloads, ~/Documents, ~/Desktop, /tmp.",
+        "description": "Crea o escribe texto. Si el archivo ya existe, expected_file_hash es obligatorio y evita sobrescribir cambios ajenos. Devuelve el file_hash final. USAR SIEMPRE para crear archivos en vez de run_python.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -112,6 +18,10 @@ total_tools = [
                     "type": "string",
                     "description": "'w' para sobreescribir (default), 'a' para añadir al final",
                     "enum": ["w", "a"]
+                },
+                "expected_file_hash": {
+                    "type": "string",
+                    "description": "Hash de la última lectura/escritura. Obligatorio si el archivo ya existe; la escritura se rechaza si cambió."
                 }
             }
         },
@@ -121,7 +31,8 @@ total_tools = [
         "type": "function",
         "name": "edit_file",
         "description": """Modifica un archivo existente reemplazando un fragmento de texto exacto por otro, sin reescribir el archivo entero.
-        Devuelve file_hash md5 del estado final.
+        Requiere expected_file_hash de la última lectura/escritura y rechaza la edición si el archivo cambió.
+        Devuelve file_hash del estado final.
         Funciona como search-and-replace: busca 'old_text' en el archivo y lo sustituye por 'new_text'.
         - old_text debe coincidir EXACTAMENTE con el contenido del archivo (incluyendo espacios, indentación y saltos de línea).
         - Para eliminar texto, pasar new_text vacío ("").
@@ -146,10 +57,14 @@ total_tools = [
                 "replace_all": {
                     "type": "boolean",
                     "description": "true para reemplazar todas las ocurrencias, false (default) solo la primera"
+                },
+                "expected_file_hash": {
+                    "type": "string",
+                    "description": "Hash de la última lectura/escritura. Obligatorio y usado para detectar cambios concurrentes."
                 }
             }
         },
-        "required": ["path", "old_text", "new_text"]
+        "required": ["path", "old_text", "new_text", "expected_file_hash"]
     },
     {
         "type": "function",
@@ -230,22 +145,6 @@ total_tools = [
             }
         },
         "required": ["path"]
-    },
-    {
-        "type": "function",
-        "name": "ask_user",
-        "description": """Esta herramienta se usará cuando se necesite concretar detalles de la ejcución o permisos para acción crítica
-        sin interrumpir el flujo de ejecución ni derivar en otros agentes""",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "question": {
-                    "type": "string",
-                    "description": "Pregunta que se le desea hacer al usuario"
-                },
-            }
-        },
-        "required": ["question"]
     },
     {
         "type": "function",
@@ -605,22 +504,6 @@ total_tools = [
     },
     {
         "type": "function",
-        "name": "store_actions",
-        "description": """Esta herramineta se usará para almacenar un historial resumido 10-1000 palabras 
-        con lo que se ha realizado a lo largo de la conversación""",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Consulta web deseada"
-                }
-            }
-        },
-        "required": ["query"]
-    },
-    {
-        "type": "function",
         "name": "WebSearchAgent",
         "description": "Subagente dedicado a la busqueda Web especializado en busquedas generales e investigación",
         "parameters": {
@@ -632,7 +515,7 @@ total_tools = [
                 }
             }
         },
-        "required": ["query"]
+        "required": ["plan"]
     },
     {
         "type": "function",
@@ -667,72 +550,29 @@ total_tools = [
         },
         "required": ["query"]
     },
-    {
-        "type": "function",
-        "name": "MemoryAgent",
-        "description": """Esta herramienta se usará siempre que se necesite saber la preferencia del usuario pasadas,
-        Cambios que se hicieron,procesos o ejecuciones o cualquier dato que pueda ser necesario recuperar de una interacción pasada""",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Los datos o posibles intenciones/acciones que se quieran buscar en la memoria del agente"
-                },
-                "specificity": {
-                    "type": "string",
-                    "description": "Número entre 1 y 5 que describa si se tiene muy claro que se tiene que consultar 5 y a menos específico bajará hasta 1"
-                },
-                "type": {
-                    "type": "string",
-                    "description": "Si está claro se debe aclarar si la consulta es sobre una de las siguientes opciones: preference|action|info"
-                }
-            }
-        },
-        "required": ["query"]
-    },
-    {
-        "type": "function",
-        "name": "ExecutorAgent",
-        "description": """Ejecuta el plan detallado generado por el planner usando el siguiente formato JSON: 
-        [{\"step_id\": \"<id>\", \"descripcion\": \"<Accion atomica>\", \"input\": \"<string>\", \"expected_output\": \"<string>\"}]""",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "execution_plan": {
-                    "type": "array",
-                    "description": "Plan de ejecución paso a paso",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step_id": {"type": "string"},
-                            "descripcion": {"type": "string"},
-                            "input": {"type": "string"},
-                            "expected_output": {"type": "string"}
-                        },
-                        "required": ["step_id", "descripcion", "input", "expected_output"]
-                    }
-                }
-            }
-        },
-        "required": ["execution_plan"]
-    }
 ]
 
 
-def adapt_tools_for_langchain(tools):
-    adapted = {}
-    for t in tools:
-        adapted[t["name"]] = {
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["parameters"]
-            }
-        }
-    return adapted
+def _prepare_function_tool(tool: dict) -> dict:
+    """Normaliza y valida el contrato esperado por Responses API."""
+    if tool.get("type") != "function":
+        return tool
+
+    parameters = tool.setdefault("parameters", {"type": "object", "properties": {}})
+    properties = parameters.setdefault("properties", {})
+    properties.setdefault("max_chars", {
+        "type": "integer",
+        "description": "Máximo deseado para la salida total de la tool. El sistema puede aplicar un límite de seguridad menor.",
+    })
+    required = parameters.setdefault("required", tool.pop("required", []))
+    missing = sorted(set(required) - set(properties))
+    if missing:
+        raise ValueError(f"Tool {tool.get('name')!r} requires undefined properties: {missing}")
+
+    parameters.setdefault("additionalProperties", False)
+    tool.setdefault("strict", False)
+    return tool
 
 
-#dict_total_tools = adapt_tools_for_langchain(total_tools)
+total_tools = [_prepare_function_tool(tool) for tool in total_tools]
 dict_total_tools = {tool["name"]: tool for tool in total_tools}

@@ -37,8 +37,6 @@ class AgentRunner:
         self.agent_names = agent_builder.agent_names
 
         runner_config = agent_builder.get_runner_config()
-        self.max_messages = int(runner_config["max_messages"])
-        self.keep_after_reset = int(runner_config["keep_after_reset"])
         self.max_iterations = int(runner_config["max_iterations"])
 
         self.session_manager = RedisSessionManager(redis_url=redis_url)
@@ -64,7 +62,6 @@ class AgentRunner:
     _normalize_message_content = staticmethod(context_utils.normalize_message_content)
     _normalize_image_detail = staticmethod(image_utils.normalize_image_detail)
     _normalize_image_part = staticmethod(image_utils.normalize_image_part)
-    _find_context_overlap = staticmethod(context_utils.find_context_overlap)
     _serialize_tool_result = staticmethod(context_utils.serialize_tool_result)
     _serialize_user_payload = staticmethod(context_utils.serialize_user_payload)
     _image_input_to_part = staticmethod(image_utils.image_input_to_part)
@@ -314,7 +311,6 @@ class AgentRunner:
         max_iterations = max_iterations or self.agent_builder.get_agent_max_iterations(agent_name)
         raw_user_text = self._serialize_user_payload(task_description)
         exec_ctx.context[agent_name].append(self._build_user_message_item(raw_user_text))
-        self._truncate_context_if_needed(agent_name, exec_ctx)
 
         working_context = copy.deepcopy(exec_ctx.context[agent_name])
         working_context[-1] = self._build_user_message_item(
@@ -333,7 +329,6 @@ class AgentRunner:
         user_message = self._build_user_message_item(user_input, images=images)
         exec_ctx.context[agent_name].append(user_message)
 
-        self._truncate_context_if_needed(agent_name, exec_ctx)
         working_context = copy.deepcopy(exec_ctx.context[agent_name])
         working_context[-1] = self._with_replaced_message_text(
             working_context[-1],
@@ -399,26 +394,19 @@ class AgentRunner:
     ):
         tool_results = await self._execute_tools_parallel(function_calls, agent_name, exec_ctx)
         for call_id, result in tool_results.items():
+            tool_call = next(call for call in function_calls if call["call_id"] == call_id)
+            try:
+                requested_chars = json.loads(tool_call["arguments"]).get("max_chars")
+                requested_chars = int(requested_chars) if requested_chars is not None else None
+            except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+                requested_chars = None
             tool_output = {
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": self._serialize_tool_result(result),
+                "output": self._serialize_tool_result(result, requested_chars),
             }
             working_context.append(tool_output)
             exec_ctx.context[agent_name].append(tool_output)
-
-    def _truncate_context_if_needed(self, agent_name: str, exec_ctx: ExecutionContext) -> bool:
-        context = exec_ctx.context[agent_name]
-        user_msg_indices = [
-            i for i, msg in enumerate(context)
-            if msg.get("type") == "message" and msg.get("role") == "user"
-        ]
-        if len(user_msg_indices) > self.max_messages:
-            cut_index = user_msg_indices[-self.keep_after_reset]
-            exec_ctx.context[agent_name] = context[cut_index:]
-            print(f"\033[1;33m  [CONTEXT] Reset: {len(user_msg_indices)} -> {self.keep_after_reset} mensajes\033[0m")
-            return True
-        return False
 
     async def delete_session(self, session_id: str):
         await self.session_manager.delete_session(session_id)

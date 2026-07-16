@@ -76,20 +76,19 @@ class RunnerMultimodalTests(unittest.TestCase):
         self.assertIn("[ExecutorAgent] user: analiza", memory_text)
         self.assertIn("[ExecutorAgent] user: [1 imagen(es) adjunta(s)]", memory_text)
 
-    def test_context_delta_extracts_only_new_items_after_truncation(self):
+    def test_context_delta_extracts_only_appended_items(self):
         runner = object.__new__(AgentRunner)
         runner.agent_names = {"ExecutorAgent"}
         before = {
             "ExecutorAgent": [
                 AgentRunner._build_user_message_item("antiguo 1"),
                 AgentRunner._build_user_message_item("antiguo 2"),
-                AgentRunner._build_user_message_item("antiguo 3"),
             ]
         }
         after = {
             "ExecutorAgent": [
+                AgentRunner._build_user_message_item("antiguo 1"),
                 AgentRunner._build_user_message_item("antiguo 2"),
-                AgentRunner._build_user_message_item("antiguo 3"),
                 AgentRunner._build_user_message_item("nuevo"),
                 {
                     "type": "function_call_output",

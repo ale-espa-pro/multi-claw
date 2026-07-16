@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 from typing import Any, Optional
 
 from runner.images import normalize_image_part
@@ -127,17 +128,6 @@ def serialize_context_for_memory(context: dict[str, list[dict[str, Any]]]) -> st
     return "\n".join(lines)
 
 
-def find_context_overlap(
-    before_items: list[dict[str, Any]],
-    after_items: list[dict[str, Any]],
-) -> int:
-    max_overlap = min(len(before_items), len(after_items))
-    for overlap in range(max_overlap, 0, -1):
-        if before_items[-overlap:] == after_items[:overlap]:
-            return overlap
-    return 0
-
-
 def build_context_delta(
     before_context: dict[str, Any],
     after_context: dict[str, Any],
@@ -150,14 +140,55 @@ def build_context_delta(
     for agent_name in agent_names:
         before_items = before.get(agent_name, [])
         after_items = after.get(agent_name, [])
-        overlap = find_context_overlap(before_items, after_items)
-        delta[agent_name] = copy.deepcopy(after_items[overlap:])
+        if after_items[:len(before_items)] == before_items:
+            delta[agent_name] = copy.deepcopy(after_items[len(before_items):])
+        else:
+            delta[agent_name] = copy.deepcopy(after_items)
 
     return delta
 
 
-def serialize_tool_result(result: Any) -> str:
-    return json.dumps(result, ensure_ascii=False, default=str)
+DEFAULT_TOOL_OUTPUT_MAX_CHARS = 100_000
+DEFAULT_TOOL_OUTPUT_HARD_MAX_CHARS = 1_000_000
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        return max(int(os.getenv(name, default)), 1)
+    except (TypeError, ValueError):
+        return default
+
+
+def serialize_tool_result(result: Any, requested_chars: int | None = None) -> str:
+    """Serialize a tool result and keep oversized outputs out of model context."""
+    serialized = json.dumps(result, ensure_ascii=False, default=str)
+    configured_limit = _positive_env_int(
+        "TOOL_OUTPUT_MAX_CHARS", DEFAULT_TOOL_OUTPUT_MAX_CHARS
+    )
+    hard_limit = _positive_env_int(
+        "TOOL_OUTPUT_HARD_MAX_CHARS", DEFAULT_TOOL_OUTPUT_HARD_MAX_CHARS
+    )
+    requested = requested_chars if requested_chars and requested_chars > 0 else configured_limit
+    # A tool's max_chars usually limits one content field, not its JSON metadata.
+    # Small requests must therefore not shrink the global safety budget.
+    effective_limit = min(max(configured_limit, requested), hard_limit)
+
+    if len(serialized) <= effective_limit:
+        return serialized
+
+    preview = serialized[:effective_limit]
+    envelope = {
+        "truncated": True,
+        "shown_chars": len(preview),
+        "remaining_chars": len(serialized) - len(preview),
+        "total_chars": len(serialized),
+        "requested_chars": requested,
+        "effective_limit_chars": effective_limit,
+        "limit_clamped": requested > hard_limit,
+        "content": preview,
+        "hint": "Call the same tool again with a larger max_chars if more content is needed.",
+    }
+    return json.dumps(envelope, ensure_ascii=False)
 
 
 def serialize_user_payload(payload: Any) -> str:

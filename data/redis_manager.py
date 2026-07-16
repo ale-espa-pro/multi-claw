@@ -6,10 +6,13 @@ import redis.asyncio as redis
 class RedisSessionManager:
     """Manejador de sesiones y contexto persistido en Redis."""
     
-    def __init__(self, redis_url: str | None = None, context_ttl: int = 120):
+    def __init__(self, redis_url: str | None = None, context_ttl: int | None = None):
         self.redis_url = redis_url or os.getenv("REDIS_URL")
         self.redis_client = None
-        self.context_ttl = context_ttl  # 24 horas por defecto
+        configured_ttl = context_ttl if context_ttl is not None else os.getenv(
+            "REDIS_CONTEXT_TTL_SECONDS", "86400"
+        )
+        self.context_ttl = max(int(configured_ttl), 60)
     
     async def get_client(self):
         """Obtiene o crea conexión a Redis (thread-safe con connection pool)."""

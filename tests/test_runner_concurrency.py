@@ -28,8 +28,6 @@ class _FakeAgentBuilder:
 
     def get_runner_config(self):
         return {
-            "max_messages": 120,
-            "keep_after_reset": 10,
             "max_iterations": 400,
         }
 
@@ -216,6 +214,31 @@ class RunnerConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(user_texts, [prompt])
             self.assertEqual(assistant_texts, [str(number)])
+
+    async def test_context_is_not_truncated_after_120_messages(self):
+        runner = AgentRunner(client=_FakeClient(0), agent_builder=_FakeAgentBuilder())
+        runner.session_manager = _InMemorySessionManager()
+        session_id = "long-running-session"
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            for number in range(1, 122):
+                await runner.process_message(
+                    session_id=session_id,
+                    user_input=f"responde unicamente el número {number}",
+                )
+
+        context = runner.session_manager.contexts[session_id]["ExecutorAgent"]
+        user_messages = [
+            item for item in context
+            if item.get("type") == "message" and item.get("role") == "user"
+        ]
+        assistant_messages = [
+            item for item in context
+            if item.get("type") == "message" and item.get("role") == "assistant"
+        ]
+
+        self.assertEqual(len(user_messages), 121)
+        self.assertEqual(len(assistant_messages), 121)
 
 
 if __name__ == "__main__":

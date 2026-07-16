@@ -15,6 +15,7 @@ import queue
 import resource
 import signal
 import subprocess
+import tempfile
 import time
 import traceback
 import uuid
@@ -103,6 +104,38 @@ def _file_hash(path: str) -> dict:
         "bytes": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
     }
+
+
+def _file_conflict(path: str, expected_hash: str | None) -> dict | None:
+    """Return an actionable error when a file is not at the expected version."""
+    current_hash = _file_hash(path)["value"]
+    if expected_hash == current_hash:
+        return None
+    return {
+        "success": False,
+        "error": "file_conflict",
+        "message": "The file changed since the agent last read or wrote it.",
+        "path": path,
+        "expected_file_hash": expected_hash,
+        "current_file_hash": current_hash,
+        "action_required": "Read the file again, review the changes, then retry with its new hash.",
+    }
+
+
+def _atomic_write_text(path: str, content: str, encoding: str) -> None:
+    """Replace a text file atomically, leaving the old version intact on failure."""
+    directory = os.path.dirname(path)
+    fd, temporary_path = tempfile.mkstemp(prefix=".agent-write-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as temporary_file:
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary_path)
+        raise
 
 
 # ── Herramientas: Archivos ──────────────────────────────────────────
@@ -206,7 +239,7 @@ def action_write_file(body: dict) -> dict:
     """
     Escribe contenido a un archivo de texto.
     Requiere: path (str), content (str).
-    Opcional: mode ('w'|'a'), encoding (default 'utf-8').
+    Opcional: mode ('w'|'a'), encoding (default 'utf-8'), expected_file_hash.
     """
     path = body.get("path")
     content = body.get("content")
@@ -219,6 +252,8 @@ def action_write_file(body: dict) -> dict:
     if mode not in ("w", "a"):
         return {"success": False, "error": "mode must be 'w' or 'a'"}
     encoding = body.get("encoding", "utf-8")
+    expected_hash = (body.get("expected_file_hash") or "").strip() or None
+    submitted_bytes = len(content.encode(encoding))
 
     # ✅ FIX: expandir ~ y $HOME antes de validar
     real_path = _resolve_path(path)
@@ -232,12 +267,22 @@ def action_write_file(body: dict) -> dict:
 
     try:
         os.makedirs(os.path.dirname(real_path), exist_ok=True)
-        with open(real_path, mode, encoding=encoding) as f:
-            f.write(content)
+        if os.path.exists(real_path):
+            conflict = _file_conflict(real_path, expected_hash)
+            if conflict:
+                return conflict
+            if mode == "a":
+                with open(real_path, "r", encoding=encoding, errors="replace") as existing_file:
+                    content = existing_file.read() + content
+            _atomic_write_text(real_path, content, encoding)
+        else:
+            # Exclusive creation avoids silently replacing a file created concurrently.
+            with open(real_path, "x", encoding=encoding) as new_file:
+                new_file.write(content)
         return {
             "success": True,
             "path": real_path,
-            "bytes_written": len(content.encode(encoding)),
+            "bytes_written": submitted_bytes,
             "file_hash": _file_hash(real_path),
         }
     except Exception as e:
@@ -247,12 +292,13 @@ def action_write_file(body: dict) -> dict:
 def action_edit_file(body: dict) -> dict:
     """
     Modifica un archivo reemplazando old_text por new_text (search-and-replace).
-    Requiere: path, old_text, new_text.
+    Requiere: path, old_text, new_text, expected_file_hash.
     Opcional: replace_all (bool, default False).
     """
     path = body.get("path")
     old_text = body.get("old_text")
     new_text = body.get("new_text")
+    expected_hash = (body.get("expected_file_hash") or "").strip() or None
 
     if not path:
         return {"success": False, "error": "missing required field: path"}
@@ -276,6 +322,10 @@ def action_edit_file(body: dict) -> dict:
     replace_all = bool(body.get("replace_all", False))
 
     try:
+        conflict = _file_conflict(real_path, expected_hash)
+        if conflict:
+            return conflict
+
         with open(real_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
 
@@ -298,8 +348,7 @@ def action_edit_file(body: dict) -> dict:
 
         new_content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
 
-        with open(real_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
+        _atomic_write_text(real_path, new_content, "utf-8")
 
         replacements = count if replace_all else 1
         return {
@@ -1464,7 +1513,7 @@ def _passthrough_agent(body: dict) -> str:
 
 _AGENTS = [
     "ExecutorAgent", "WebSearchAgent", "DeviceManagerAgent",
-    "PlaywrightSessionAgent", "MCPManagerAgent", "MemoryAgent",
+    "PlaywrightSessionAgent", "MCPManagerAgent",
 ]
 
 ticket_dispatcher: dict[str, callable] = {

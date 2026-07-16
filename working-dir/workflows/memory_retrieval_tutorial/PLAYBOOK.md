@@ -180,6 +180,10 @@ La vectorial mejora mucho cuando ya has filtrado por:
 - longitud
 - fecha o shortlist de sesiones
 
+## Troubleshooting / errores frecuentes
+
+- Los guards de operaciones pueden hacer matching léxico sobre keywords incluso dentro de literales SQL. Evita términos DML destructivos en strings de búsqueda; usa sinónimos neutros, filtros `ILIKE` alternativos o búsquedas separadas.
+
 ## Patrones que NO conviene usar por defecto
 
 - vectorial sobre todos los `conversation_chunks`
@@ -253,6 +257,8 @@ Patrón:
   2. verificación en fuente fiable (`context_jsonb` puntual, artefactos estructurados o logs originales);
   3. deduplicación por una clave estable y específica del dominio.
 - Evita contar como eventos reales simples menciones, resúmenes o chunks sin evidencia verificable. Si no hay clave estable, reporta confirmados vs ambiguos y no inventes un total automático.
+- Distingue evidencia de ejecución `confirmada`, `parcial/intentada` y `ambigua`; una acción fallida puede seguir siendo arriesgada, indicando cuánto llegó a ejecutarse.
+- En comparativas de riesgo, ordena la evidencia verificada por impacto, irreversibilidad, alcance o privilegios, exposición de datos o secretos, efecto externo y dificultad de rollback.
 - Ejemplos breves de claves estables: job id o documento+timestamp en acciones de sistema; `message_id`/`threadId` en correos; id de transacción, id de tarea o ruta+hash en artefactos. Separa cuando convenga conteo amplio (`scanned/listed/candidato`) y conteo estricto (`selected/executed/downloaded/confirmado`).
 - Si un agregado indica elementos no listados (`messages_scanned`, `n_results`, `total_found`, etc.), decláralo y decide explícitamente si representa total fiable, límite inferior o señal incompleta.
 

@@ -46,8 +46,6 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
                 json.dumps(
                     {
                         "_runner": {
-                            "max_messages": 7,
-                            "keep_after_reset": 3,
                             "max_iterations": 11,
                         },
                         "_defaults": {
@@ -79,7 +77,7 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
 
         self.assertEqual(
             builder.get_runner_config(),
-            {"max_messages": 7, "keep_after_reset": 3, "max_iterations": 11},
+            {"max_iterations": 11},
         )
         self.assertEqual(builder.get_agent_max_iterations("WebSearchAgent"), 5)
         self.assertEqual(builder.get_tools_for_agent("WebSearchAgent"), [{"type": "web_search"}])

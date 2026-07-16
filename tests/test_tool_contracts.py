@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from runner.context import serialize_tool_result
 from tools.local_tools import dict_total_tools
 from tools.ticket_dispatcher import (
     action_edit_file,
@@ -21,6 +23,37 @@ from tools.memoryTools import RAG_memory
 
 
 class ToolContractTests(unittest.TestCase):
+    def test_only_configured_tools_are_exposed_with_responses_contracts(self):
+        config_path = Path(__file__).parents[1] / "agents" / "agent_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        configured_tools = {
+            tool
+            for agent_name, agent_config in config.items()
+            if not agent_name.startswith("_")
+            for tool in agent_config.get("tools", [])
+            if isinstance(tool, str)
+        }
+
+        self.assertEqual(set(dict_total_tools), configured_tools)
+        self.assertNotIn("MemoryAgent", dict_total_tools)
+        self.assertNotIn("MemoryAgent", ticket_dispatcher)
+
+        allowed_keys = {"type", "name", "description", "parameters", "strict"}
+        for name, tool in dict_total_tools.items():
+            with self.subTest(tool=name):
+                self.assertEqual(set(tool) - allowed_keys, set())
+                self.assertEqual(tool["type"], "function")
+                self.assertIs(tool["strict"], False)
+                self.assertNotIn("required", tool)
+                parameters = tool["parameters"]
+                self.assertEqual(parameters["type"], "object")
+                self.assertIs(parameters["additionalProperties"], False)
+                self.assertIn("max_chars", parameters["properties"])
+                self.assertLessEqual(
+                    set(parameters["required"]),
+                    set(parameters["properties"]),
+                )
+
     def test_playwright_schema_defaults_to_compact_outputs(self):
         tool = dict_total_tools["playwright_navigate"]
         properties = tool["parameters"]["properties"]
@@ -87,10 +120,68 @@ class ToolContractTests(unittest.TestCase):
                 "path": path,
                 "old_text": "hola",
                 "new_text": "adios",
+                "expected_file_hash": first_hash,
             })
             self.assertTrue(edited["success"])
             self.assertIn("file_hash", edited)
             self.assertNotEqual(edited["file_hash"]["value"], first_hash)
+
+    def test_edit_file_rejects_a_stale_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "note.txt"
+            created = action_write_file({"path": str(path), "content": "first"})
+            stale_hash = created["file_hash"]["value"]
+            path.write_text("changed elsewhere", encoding="utf-8")
+
+            result = action_edit_file({
+                "path": str(path),
+                "old_text": "changed elsewhere",
+                "new_text": "agent edit",
+                "expected_file_hash": stale_hash,
+            })
+
+            self.assertFalse(result["success"])
+            self.assertEqual(result["error"], "file_conflict")
+            self.assertEqual(path.read_text(encoding="utf-8"), "changed elsewhere")
+            self.assertNotEqual(result["current_file_hash"], stale_hash)
+
+    def test_write_file_requires_current_hash_for_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "note.txt"
+            action_write_file({"path": str(path), "content": "original"})
+
+            rejected = action_write_file({"path": str(path), "content": "replacement"})
+
+            self.assertFalse(rejected["success"])
+            self.assertEqual(rejected["error"], "file_conflict")
+            self.assertEqual(path.read_text(encoding="utf-8"), "original")
+
+    def test_global_tool_output_limit_returns_counts(self):
+        import unittest.mock
+
+        with unittest.mock.patch.dict("os.environ", {
+            "TOOL_OUTPUT_MAX_CHARS": "20",
+            "TOOL_OUTPUT_HARD_MAX_CHARS": "30",
+        }):
+            output = json.loads(serialize_tool_result({"content": "x" * 100}))
+
+        self.assertTrue(output["truncated"])
+        self.assertEqual(output["shown_chars"], 20)
+        self.assertEqual(output["remaining_chars"], output["total_chars"] - 20)
+        self.assertFalse(output["limit_clamped"])
+
+    def test_requested_tool_limit_is_clamped_to_hard_limit(self):
+        import unittest.mock
+
+        with unittest.mock.patch.dict("os.environ", {
+            "TOOL_OUTPUT_MAX_CHARS": "20",
+            "TOOL_OUTPUT_HARD_MAX_CHARS": "30",
+        }):
+            output = json.loads(serialize_tool_result({"content": "x" * 100}, 50))
+
+        self.assertEqual(output["requested_chars"], 50)
+        self.assertEqual(output["effective_limit_chars"], 30)
+        self.assertTrue(output["limit_clamped"])
 
     def test_save_preference_can_append_replace_and_delete(self):
         import tools.ticket_dispatcher as dispatcher

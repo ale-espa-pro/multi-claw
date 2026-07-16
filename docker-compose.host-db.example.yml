@@ -14,6 +14,7 @@ services:
       MULTIAGENT_PG_PASSWORD: ${DOCKER_MULTIAGENT_PG_PASSWORD:?DOCKER_MULTIAGENT_PG_PASSWORD is required}
       MULTIAGENT_PG_SCHEMA: ${MULTIAGENT_PG_SCHEMA:-multiagente}
       REDIS_URL: ${DOCKER_REDIS_URL:-redis://127.0.0.1:6379}
+      REDIS_CONTEXT_TTL_SECONDS: ${REDIS_CONTEXT_TTL_SECONDS:-86400}
       WORKING_PATH: /app/working-dir
       USER_PREFERENCES_PATH: /app/working-dir/memory/user_preferences.txt
       SESSIONS_PATH: /app/working-dir/sessions

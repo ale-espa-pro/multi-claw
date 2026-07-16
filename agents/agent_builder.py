@@ -35,8 +35,6 @@ DEFAULT_AGENT_PARAMS = {
     "max_iterations": 10,
 }
 DEFAULT_RUNNER_CONFIG = {
-    "max_messages": 120,
-    "keep_after_reset": 10,
     "max_iterations": 400,
 }
 
