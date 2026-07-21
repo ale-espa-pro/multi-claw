@@ -536,13 +536,6 @@ class PostgresConversationStore:
                     (session_id,),
                 )
 
-    async def execute_query(self, query: str) -> list[dict[str, Any]]:
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(query)
-                return await cur.fetchall()
-
     async def execute_readonly_query(self, sql: str) -> list[dict[str, Any]]:
         """Execute a SQL query inside a read-only transaction for safety."""
         pool = self._require_pool()
@@ -580,21 +573,6 @@ class PostgresConversationStore:
                     f"DELETE FROM {self.conversation_chunks_table} WHERE session_id = %s",
                     (session_id,),
                 )
-
-    async def get_next_chunk_order(self, session_id: str) -> int:
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    """
-                    SELECT COALESCE(MAX(message_order) + 1, 0) AS next_order
-                    FROM {conversation_chunks_table}
-                    WHERE session_id = %s
-                    """.format(conversation_chunks_table=self.conversation_chunks_table),
-                    (session_id,),
-                )
-                row = await cur.fetchone()
-        return int(row["next_order"]) if row is not None else 0
 
     async def save_chunks(
         self,
@@ -639,68 +617,49 @@ class PostgresConversationStore:
                     row = await cur.fetchone()
                     next_order = int(row[0]) if row and row[0] is not None else 0
 
+                vector_enabled = self._is_vector_enabled()
+                insert_sql = """
+                    INSERT INTO {conversation_chunks_table} (
+                        session_id,
+                        message_order,
+                        conversation_type,
+                        chunck,
+                        embedding
+                    )
+                    VALUES (%s, %s, %s, %s, {embedding_placeholder})
+                    ON CONFLICT (session_id, message_order) DO UPDATE
+                    SET conversation_type = COALESCE(
+                            EXCLUDED.conversation_type,
+                            {conversation_chunks_table}.conversation_type
+                        ),
+                        chunck = EXCLUDED.chunck,
+                        embedding = EXCLUDED.embedding,
+                        updated_at = now()
+                    """.format(
+                    conversation_chunks_table=self.conversation_chunks_table,
+                    embedding_placeholder=(
+                        f"%s::{self._embedding_sql_cast()}" if vector_enabled else "%s"
+                    ),
+                )
+
                 saved_chunks: list[dict[str, Any]] = []
                 for offset, chunk in enumerate(normalized_chunks):
                     message_order = next_order + offset
-                    if self._is_vector_enabled():
-                        await cur.execute(
-                            """
-                        INSERT INTO {conversation_chunks_table} (
-                            session_id,
-                            message_order,
-                            conversation_type,
-                            chunck,
-                            embedding
-                        )
-                        VALUES (%s, %s, %s, %s, %s::{embedding_sql_cast})
-                        ON CONFLICT (session_id, message_order) DO UPDATE
-                        SET conversation_type = COALESCE(
-                                EXCLUDED.conversation_type,
-                                {conversation_chunks_table}.conversation_type
-                            ),
-                                chunck = EXCLUDED.chunck,
-                                embedding = EXCLUDED.embedding,
-                                updated_at = now()
-                        """.format(
-                            conversation_chunks_table=self.conversation_chunks_table,
-                            embedding_sql_cast=self._embedding_sql_cast(),
-                        ),
+                    embedding_value = (
+                        self._vector_literal(chunk["embedding"])
+                        if vector_enabled
+                        else Jsonb(chunk["embedding"])
+                    )
+                    await cur.execute(
+                        insert_sql,
                         (
                             session_id,
                             message_order,
                             conversation_type,
                             chunk["chunck"],
-                                self._vector_literal(chunk["embedding"]),
-                            ),
-                        )
-                    else:
-                        await cur.execute(
-                            """
-                            INSERT INTO {conversation_chunks_table} (
-                                session_id,
-                                message_order,
-                                conversation_type,
-                                chunck,
-                                embedding
-                            )
-                            VALUES (%s, %s, %s, %s, %s)
-                            ON CONFLICT (session_id, message_order) DO UPDATE
-                            SET conversation_type = COALESCE(
-                                    EXCLUDED.conversation_type,
-                                    {conversation_chunks_table}.conversation_type
-                                ),
-                                chunck = EXCLUDED.chunck,
-                                embedding = EXCLUDED.embedding,
-                                updated_at = now()
-                            """.format(conversation_chunks_table=self.conversation_chunks_table),
-                            (
-                                session_id,
-                                message_order,
-                                conversation_type,
-                                chunk["chunck"],
-                                Jsonb(chunk["embedding"]),
-                            ),
-                        )
+                            embedding_value,
+                        ),
+                    )
                     saved_chunks.append(
                         {
                             "session_id": session_id,

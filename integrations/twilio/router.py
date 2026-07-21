@@ -1,9 +1,11 @@
 # twilio/router.py
+import asyncio
 import time
 from collections import defaultdict, deque
 
 import redis.asyncio as redis
 from fastapi import APIRouter, Response, Request, HTTPException
+from twilio.rest import Client as TwilioRestClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 from dotenv import load_dotenv
@@ -34,6 +36,8 @@ REDIS_URL = os.getenv("REDIS_URL")
 # Runner del agente
 _agent_runner = None
 _redis_client = None
+_twilio_rest_client: TwilioRestClient | None = None
+_background_replies: set[asyncio.Task] = set()
 _local_rate_buckets: dict[str, deque[float]] = defaultdict(deque)
 _local_seen_messages: dict[str, float] = {}
 
@@ -41,6 +45,13 @@ _local_seen_messages: dict[str, float] = {}
 def set_agent_runner(runner):
     global _agent_runner
     _agent_runner = runner
+
+
+def _get_twilio_rest_client() -> TwilioRestClient | None:
+    global _twilio_rest_client
+    if _twilio_rest_client is None and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        _twilio_rest_client = TwilioRestClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return _twilio_rest_client
 
 
 async def _get_redis():
@@ -144,6 +155,48 @@ async def _check_rate_limits(sender: str) -> bool:
     return minute_ok and day_ok and global_ok
 
 
+async def _send_whatsapp_reply(client: TwilioRestClient, to: str, from_: str, body: str):
+    for chunk in _split_words(body):
+        # El SDK de Twilio es síncrono; to_thread evita bloquear el event loop.
+        await asyncio.to_thread(
+            client.messages.create,
+            to=to,
+            from_=from_,
+            body=chunk,
+        )
+
+
+async def _process_and_reply(session_id: str, user_message: str, sender: str, receiver: str):
+    """Procesa el mensaje en background y responde vía la REST API de Twilio.
+
+    Los webhooks de Twilio expiran a ~15s, así que el agente (que puede tardar
+    minutos) no puede responder dentro del propio webhook.
+    """
+    try:
+        response = await _agent_runner.process_message(
+            session_id=session_id,
+            user_input=user_message,
+        )
+        print(f"Session: {session_id} \n message: {user_message} \n response: {response}")
+    except Exception as e:
+        print(f"Error procesando mensaje de Twilio: {e}")
+        response = "Error procesando tu mensaje."
+
+    client = _get_twilio_rest_client()
+    if client is None:
+        return
+    try:
+        await _send_whatsapp_reply(client, to=sender, from_=receiver, body=response)
+    except Exception as e:
+        print(f"Error enviando respuesta por Twilio REST: {e}")
+
+
+def _schedule_reply(session_id: str, user_message: str, sender: str, receiver: str):
+    task = asyncio.create_task(_process_and_reply(session_id, user_message, sender, receiver))
+    _background_replies.add(task)
+    task.add_done_callback(_background_replies.discard)
+
+
 async def _mark_message_seen(message_sid: str | None) -> bool:
     if not message_sid:
         return False
@@ -208,6 +261,14 @@ async def whatsapp_webhook(request: Request):
         twiml.message("Error: Agente no configurado.")
         return Response(content=str(twiml), media_type="application/xml")
 
+    receiver = form_data.get("To", "")
+    if _get_twilio_rest_client() is not None and receiver:
+        # ACK inmediato: el agente responde luego vía REST API en background.
+        _schedule_reply(session_id, user_message, sender=From, receiver=receiver)
+        return Response(content=str(twiml), media_type="application/xml")
+
+    # Fallback síncrono (sin credenciales REST, p. ej. pruebas locales):
+    # solo sirve para respuestas que lleguen antes del timeout del webhook.
     try:
         response = await _agent_runner.process_message(
             session_id=session_id,

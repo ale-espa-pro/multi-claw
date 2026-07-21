@@ -31,10 +31,5 @@
         "tools": ["playwright_session", "web_fetch", "read_file", "file_hash", "interpret_image", "memory_query"],
         "json_response": true,
         "parallel_tool_calls": true
-    },
-    "CronosAgent": {
-        "tools": ["memory_query"],
-        "json_response": true,
-        "parallel_tool_calls": true
     }
 }

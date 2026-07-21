@@ -159,7 +159,6 @@ También acepta `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
 
 - `GET /conversations`
 - `GET /conversations/{session_id}`
-- `DELETE /session/{session_id}`
 - `DELETE /conversations/{session_id}`
 - `POST /twilio/webhook`
 

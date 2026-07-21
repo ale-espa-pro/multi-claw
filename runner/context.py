@@ -80,6 +80,19 @@ def normalize_context_item(item: Any) -> Optional[dict[str, Any]]:
             output = json.dumps(output, ensure_ascii=False)
         return {"type": "function_call_output", "call_id": call_id, "output": output}
 
+    if item_type == "reasoning":
+        # Items de razonamiento del proveedor: se conservan tal cual para poder
+        # reenviarlos en turnos posteriores (cada proveedor filtra los suyos).
+        provider = item.get("provider")
+        if provider == "anthropic":
+            block = item.get("block")
+            if not isinstance(block, dict):
+                return None
+            return {"type": "reasoning", "provider": "anthropic", "block": block}
+        if provider == "openai":
+            return {k: v for k, v in item.items() if v is not None}
+        return None
+
     return None
 
 
@@ -149,7 +162,7 @@ def build_context_delta(
 
 
 DEFAULT_TOOL_OUTPUT_MAX_CHARS = 100_000
-DEFAULT_TOOL_OUTPUT_HARD_MAX_CHARS = 1_000_000
+DEFAULT_TOOL_OUTPUT_HARD_MAX_CHARS = 5_000_000
 
 
 def _positive_env_int(name: str, default: int) -> int:

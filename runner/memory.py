@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from runner import context as context_utils
 from tools.memoryTools.RAG_memory import MemoryRag
 
 
@@ -60,17 +61,15 @@ class MemoryService:
         self,
         memory_rag: MemoryRag | None,
         config: MemoryRetrievalConfig,
+        agent_names: set[str],
         background_tasks: set[asyncio.Task],
         get_memory_lock: Callable[[str], Awaitable[asyncio.Lock]],
-        build_context_delta: Callable[[dict[str, Any], dict[str, Any]], dict[str, list[dict[str, Any]]]],
-        serialize_context_for_memory: Callable[[dict[str, list[dict[str, Any]]]], str],
     ):
         self.memory_rag = memory_rag
         self.config = config
+        self.agent_names = agent_names
         self.background_tasks = background_tasks
         self.get_memory_lock = get_memory_lock
-        self.build_context_delta = build_context_delta
-        self.serialize_context_for_memory = serialize_context_for_memory
 
     def prepare_query(self, text: str) -> str:
         compact = " ".join(text.split())
@@ -152,8 +151,10 @@ class MemoryService:
         if self.memory_rag is None:
             return
 
-        context_snapshot = self.build_context_delta(previous_context or {}, context)
-        memory_text = self.serialize_context_for_memory(context_snapshot)
+        context_snapshot = context_utils.build_context_delta(
+            previous_context or {}, context, self.agent_names
+        )
+        memory_text = context_utils.serialize_context_for_memory(context_snapshot)
         if not memory_text.strip():
             return
 

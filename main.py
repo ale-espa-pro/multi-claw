@@ -18,6 +18,7 @@ from data.schemas import (
     serialize_conversation_summary, serialize_conversation_detail,
 )
 from runner.agent_runner import AgentRunner
+from tools import ticket_dispatcher as ticket_dispatcher_module
 from tools.memoryTools.RAG_memory import MemoryRag
 from integrations.twilio.router import router as twilio_router, set_agent_runner
 
@@ -26,10 +27,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
+# Nota: allow_credentials=True es incompatible con allow_origins=["*"];
+# la API se autentica con el header x-api-key, no con cookies.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -38,6 +41,9 @@ app.add_middleware(
 openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"], max_retries=5, timeout=1000,  http_client=DefaultAioHttpClient())
 conversation_store = PostgresConversationStore()
 memory_rag = MemoryRag(conversation_store=conversation_store)
+
+# Las tools comparten el mismo pool de Postgres y cliente OpenAI que la app.
+ticket_dispatcher_module.configure(memory_rag=memory_rag, openai_client=openai_client)
 
 agent_builder = AgentBuilder()
 agent_builder.load_agents()
@@ -132,13 +138,6 @@ async def get_conversation(session_id: str, x_api_key: str | None = Header(defau
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return serialize_conversation_detail(conversation)
-
-
-@app.delete("/session/{session_id}")
-async def delete_session(session_id: str, x_api_key: str | None = Header(default=None)):
-    _require_api_key(x_api_key)
-    await runner.delete_session(session_id)
-    return {"status": "deleted"}
 
 
 @app.delete("/conversations/{session_id}")

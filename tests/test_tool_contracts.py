@@ -12,12 +12,11 @@ from tools.ticket_dispatcher import (
     action_file_hash,
     action_read_file,
     action_save_preference,
-    action_search_files,
     action_web_fetch,
     ticket_dispatcher,
     action_write_file,
     _resolve_image_source,
-    _truncate_text,
+    _clip_text_content,
 )
 from tools.memoryTools import RAG_memory
 
@@ -262,22 +261,8 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(read["remaining_chars"], 0)
             self.assertEqual(read["remaining_tokens"], 0)
 
-    def test_search_files_returns_remaining_results(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            Path(tmpdir, "match-alpha.txt").write_text("a", encoding="utf-8")
-            Path(tmpdir, "match-beta.txt").write_text("b", encoding="utf-8")
-            Path(tmpdir, "other.txt").write_text("c", encoding="utf-8")
-
-            result = action_search_files({"root": tmpdir, "query": "match", "limit": 1})
-
-            self.assertTrue(result["success"])
-            self.assertEqual(result["limit"], 1)
-            self.assertGreaterEqual(result["total_matches"], 2)
-            self.assertGreaterEqual(result["remaining_results"], 1)
-            self.assertEqual(len(result["results"]), 1)
-
     def test_truncate_text_returns_remaining_chars(self):
-        content, truncated, remaining = _truncate_text("abcdef", 2)
+        content, truncated, remaining = _clip_text_content("abcdef", 2)
 
         self.assertEqual(content, "ab")
         self.assertTrue(truncated)

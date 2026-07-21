@@ -2,23 +2,16 @@ import asyncio
 import copy
 import inspect
 import json
-from time import time
 from typing import Any, Optional
 
 from agents.agent_builder import AgentBuilder
 from data.conversation_store import PostgresConversationStore
 from data.redis_manager import RedisSessionManager
+from providers import AnthropicMessagesProvider, OpenAIResponsesProvider, resolve_provider_name
 from runner import context as context_utils
 from runner import images as image_utils
 from runner.execution import ExecutionContext, SessionLockRegistry
-from runner.memory import (
-    MemoryRetrievalConfig,
-    MemoryService,
-    normalize_retrieval_limit,
-    normalize_retrieval_mode,
-    normalize_retrieval_weight,
-    normalize_similarity_threshold,
-)
+from runner.memory import MemoryRetrievalConfig, MemoryService
 from tools.memoryTools.RAG_memory import MemoryRag
 
 
@@ -30,8 +23,13 @@ class AgentRunner:
         redis_url: str | None = None,
         conversation_store: PostgresConversationStore | None = None,
         memory_rag: MemoryRag | None = None,
+        anthropic_client=None,
     ):
         self.client = client
+        self._providers = {
+            "openai": OpenAIResponsesProvider(client),
+            "anthropic": AnthropicMessagesProvider(anthropic_client),
+        }
         self.agent_builder = agent_builder
         self.main_agent = agent_builder.main_agent
         self.agent_names = agent_builder.agent_names
@@ -48,74 +46,16 @@ class AgentRunner:
         self._memory_service = MemoryService(
             memory_rag=memory_rag,
             config=MemoryRetrievalConfig.from_env(),
+            agent_names=self.agent_names,
             background_tasks=self._background_tasks,
             get_memory_lock=self._locks.get_memory_lock,
-            build_context_delta=self._build_context_delta,
-            serialize_context_for_memory=self._serialize_context_for_memory,
         )
 
-    _normalize_similarity_threshold = staticmethod(normalize_similarity_threshold)
-    _normalize_retrieval_limit = staticmethod(normalize_retrieval_limit)
-    _normalize_retrieval_mode = staticmethod(normalize_retrieval_mode)
-    _normalize_retrieval_weight = staticmethod(normalize_retrieval_weight)
-    _extract_message_text = staticmethod(context_utils.extract_message_text)
-    _normalize_message_content = staticmethod(context_utils.normalize_message_content)
-    _normalize_image_detail = staticmethod(image_utils.normalize_image_detail)
-    _normalize_image_part = staticmethod(image_utils.normalize_image_part)
-    _serialize_tool_result = staticmethod(context_utils.serialize_tool_result)
-    _serialize_user_payload = staticmethod(context_utils.serialize_user_payload)
-    _image_input_to_part = staticmethod(image_utils.image_input_to_part)
-    _build_user_message_item = staticmethod(image_utils.build_user_message_item)
-    _with_replaced_message_text = staticmethod(image_utils.with_replaced_message_text)
-    _resolve_local_image_part = staticmethod(image_utils.resolve_local_image_part)
-    _prepare_context_for_api = staticmethod(image_utils.prepare_context_for_api)
-
-    def _normalize_context_item(self, item: Any) -> Optional[dict[str, Any]]:
-        return context_utils.normalize_context_item(item)
-
-    def _normalize_full_context(self, context: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-        return context_utils.normalize_full_context(context, self.agent_names)
-
-    def _serialize_context_for_memory(self, context: dict[str, list[dict[str, Any]]]) -> str:
-        return context_utils.serialize_context_for_memory(context)
-
-    def _build_context_delta(
-        self,
-        before_context: dict[str, Any],
-        after_context: dict[str, Any],
-    ) -> dict[str, list[dict[str, Any]]]:
-        return context_utils.build_context_delta(before_context, after_context, self.agent_names)
-
-    def _prepare_memory_query(self, text: str) -> str:
-        return self._memory_service.prepare_query(text)
-
-    def _format_retrieved_memory(self, chunks: list[dict[str, Any]]) -> str:
-        return self._memory_service.format_retrieved_memory(chunks)
-
-    async def _augment_user_message_with_memory(
-        self,
-        user_text: str,
-        exec_ctx: ExecutionContext,
-    ) -> str:
-        return await self._memory_service.augment_user_message(user_text, exec_ctx.session_id)
-
-    def _schedule_semantic_memory_sync(
-        self,
-        session_id: str,
-        context: dict[str, list[dict[str, Any]]],
-        previous_context: dict[str, list[dict[str, Any]]] | None = None,
-        conversation_type: str | None = None,
-    ):
-        self._memory_service.schedule_semantic_sync(
-            session_id=session_id,
-            context=context,
-            previous_context=previous_context,
-            conversation_type=conversation_type,
-        )
+    # ── Contexto persistido ──
 
     async def _load_complete_context(self, session_id: str) -> dict[str, list[dict[str, Any]]]:
         cached_context, context_exists = await self.session_manager.load_context(session_id, self.agent_names)
-        normalized_cached = self._normalize_full_context(cached_context)
+        normalized_cached = context_utils.normalize_full_context(cached_context, self.agent_names)
         if context_exists:
             return normalized_cached
 
@@ -123,7 +63,7 @@ class AgentRunner:
             return normalized_cached
 
         stored_context = await self.conversation_store.load_context(session_id)
-        normalized_stored = self._normalize_full_context(stored_context)
+        normalized_stored = context_utils.normalize_full_context(stored_context, self.agent_names)
 
         if any(normalized_stored.values()):
             await self.session_manager.save_context(session_id, normalized_stored)
@@ -136,7 +76,7 @@ class AgentRunner:
         context: dict[str, list[dict[str, Any]]],
         conversation_type: str | None = None,
     ):
-        normalized_context = self._normalize_full_context(context)
+        normalized_context = context_utils.normalize_full_context(context, self.agent_names)
         if self.conversation_store is not None:
             await self.conversation_store.save_context(
                 session_id=session_id,
@@ -145,14 +85,7 @@ class AgentRunner:
             )
         await self.session_manager.save_context(session_id, normalized_context)
 
-    async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
-        return await self._locks.get_session_lock(session_id)
-
-    async def _get_memory_lock(self, session_id: str) -> asyncio.Lock:
-        return await self._locks.get_memory_lock(session_id)
-
-    async def _cleanup_session_lock(self, session_id: str):
-        await self._locks.cleanup_session_lock(session_id)
+    # ── Entrada principal ──
 
     async def process_message(
         self,
@@ -162,46 +95,8 @@ class AgentRunner:
         conversation_type: str | None = None,
         images: list[dict[str, Any]] | None = None,
     ) -> str:
-        result = await self._process_message(
-            session_id=session_id,
-            user_input=user_input,
-            agent_name=agent_name,
-            conversation_type=conversation_type,
-            images=images,
-        )
-        result["exec_ctx"].token_tracker.print_summary()
-        return result["response"]
-
-    async def process_message_with_usage(
-        self,
-        session_id: str,
-        user_input: str,
-        agent_name: str | None = None,
-        conversation_type: str | None = None,
-        images: list[dict[str, Any]] | None = None,
-    ) -> dict:
-        result = await self._process_message(
-            session_id=session_id,
-            user_input=user_input,
-            agent_name=agent_name,
-            conversation_type=conversation_type,
-            images=images,
-        )
-        return {
-            "response": result["response"],
-            "token_usage": result["exec_ctx"].token_tracker.get_usage(),
-        }
-
-    async def _process_message(
-        self,
-        session_id: str,
-        user_input: str,
-        agent_name: str | None,
-        conversation_type: str | None,
-        images: list[dict[str, Any]] | None,
-    ) -> dict[str, Any]:
         resolved_agent = agent_name or self.main_agent
-        session_lock = await self._get_session_lock(session_id)
+        session_lock = await self._locks.get_session_lock(session_id)
 
         async with session_lock:
             exec_ctx = ExecutionContext(session_id, self.agent_names, conversation_type)
@@ -216,13 +111,14 @@ class AgentRunner:
                     context=exec_ctx.context,
                     conversation_type=conversation_type,
                 )
-                self._schedule_semantic_memory_sync(
+                self._memory_service.schedule_semantic_sync(
                     session_id=session_id,
                     context=exec_ctx.context,
                     previous_context=previous_context,
                     conversation_type=conversation_type,
                 )
-                return {"response": response, "exec_ctx": exec_ctx}
+                exec_ctx.token_tracker.print_summary()
+                return response
             except Exception:
                 try:
                     await self._persist_complete_context(
@@ -233,26 +129,38 @@ class AgentRunner:
                 except Exception:
                     pass
                 raise
-            finally:
-                await self._cleanup_session_lock(session_id)
 
-    async def _request_agent(self, agent_name: str, curr_context: list, exec_ctx: ExecutionContext):
-        system_prompt = self.agent_builder.build_system_prompt(
-            agent_name, exec_ctx.session_id, exec_ctx.conversation_type
-        )
-        messages = [{"role": "system", "content": system_prompt}] + self._prepare_context_for_api(curr_context)
-        curr_agent_tools = self.agent_builder.get_tools_for_agent(agent_name)
-        kwargs = self.agent_builder.get_response_create_kwargs(agent_name)
+    # ── Loop de agente ──
+
+    async def _request_agent(
+        self, agent_name: str, curr_context: list, exec_ctx: ExecutionContext
+    ) -> list[dict[str, Any]]:
+        system_prompt = exec_ctx.system_prompts.get(agent_name)
+        if system_prompt is None:
+            # build_system_prompt hace I/O de disco (preferencias, workflows,
+            # crons): se construye una sola vez por request y fuera del loop.
+            system_prompt = await asyncio.to_thread(
+                self.agent_builder.build_system_prompt,
+                agent_name,
+                exec_ctx.session_id,
+                exec_ctx.conversation_type,
+            )
+            exec_ctx.system_prompts[agent_name] = system_prompt
+
+        params = self.agent_builder.get_agent_params(agent_name)
+        tools = self.agent_builder.get_tools_for_agent(agent_name)
+        provider = self._providers[resolve_provider_name(params)]
 
         async with self._api_semaphore:
-            response = await self.client.responses.create(
-                input=messages,
-                tools=curr_agent_tools,
-                **kwargs,
+            result = await provider.request(
+                system_prompt=system_prompt,
+                context=curr_context,
+                tools=tools,
+                params=params,
             )
 
-        exec_ctx.token_tracker.accumulate(response, agent_name=agent_name)
-        return response
+        exec_ctx.token_tracker.accumulate(result.usage, agent_name=agent_name)
+        return result.items
 
     async def _execute_tool(self, tool_call: dict, caller_agent: str, exec_ctx: ExecutionContext):
         tool_name = tool_call["name"]
@@ -293,7 +201,15 @@ class AgentRunner:
 
         async with asyncio.TaskGroup() as tg:
             async def _run(tc):
-                call_id, result = await self._execute_tool(tc, caller_agent, exec_ctx)
+                # Una excepción inesperada en una tool no debe cancelar el resto
+                # del batch ni tumbar la request: se devuelve como resultado de
+                # error para que el modelo pueda verlo y reaccionar.
+                try:
+                    call_id, result = await self._execute_tool(tc, caller_agent, exec_ctx)
+                except Exception as exc:
+                    call_id = tc["call_id"]
+                    result = f"Error: tool '{tc.get('name')}' raised {type(exc).__name__}: {exc}"
+                    print(f"\033[1;31m  [{caller_agent}] TOOL ERROR -> {tc.get('name')}: {exc}\033[0m")
                 results[call_id] = result
 
             for tc in function_calls:
@@ -309,12 +225,12 @@ class AgentRunner:
         max_iterations: int | None = None,
     ):
         max_iterations = max_iterations or self.agent_builder.get_agent_max_iterations(agent_name)
-        raw_user_text = self._serialize_user_payload(task_description)
-        exec_ctx.context[agent_name].append(self._build_user_message_item(raw_user_text))
+        raw_user_text = context_utils.serialize_user_payload(task_description)
+        exec_ctx.context[agent_name].append(image_utils.build_user_message_item(raw_user_text))
 
         working_context = copy.deepcopy(exec_ctx.context[agent_name])
-        working_context[-1] = self._build_user_message_item(
-            await self._augment_user_message_with_memory(raw_user_text, exec_ctx)
+        working_context[-1] = image_utils.build_user_message_item(
+            await self._memory_service.augment_user_message(raw_user_text, exec_ctx.session_id)
         )
 
         return await self._run_agent_loop(agent_name, working_context, exec_ctx, max_iterations, subagent=True)
@@ -326,13 +242,13 @@ class AgentRunner:
         exec_ctx: ExecutionContext,
         images: list[dict[str, Any]] | None = None,
     ):
-        user_message = self._build_user_message_item(user_input, images=images)
+        user_message = image_utils.build_user_message_item(user_input, images=images)
         exec_ctx.context[agent_name].append(user_message)
 
         working_context = copy.deepcopy(exec_ctx.context[agent_name])
-        working_context[-1] = self._with_replaced_message_text(
+        working_context[-1] = image_utils.with_replaced_message_text(
             working_context[-1],
-            await self._augment_user_message_with_memory(user_input, exec_ctx),
+            await self._memory_service.augment_user_message(user_input, exec_ctx.session_id),
         )
 
         return await self._run_agent_loop(agent_name, working_context, exec_ctx, self.max_iterations)
@@ -346,8 +262,8 @@ class AgentRunner:
         subagent: bool = False,
     ):
         for _ in range(max_iterations):
-            response = await self._request_agent(agent_name, working_context, exec_ctx)
-            function_calls, final_message = self._collect_response_items(response, agent_name, working_context, exec_ctx)
+            items = await self._request_agent(agent_name, working_context, exec_ctx)
+            function_calls, final_message = self._collect_response_items(items, agent_name, working_context, exec_ctx)
 
             if final_message and not function_calls:
                 if subagent:
@@ -361,25 +277,24 @@ class AgentRunner:
 
     def _collect_response_items(
         self,
-        response: Any,
+        items: list[dict[str, Any]],
         agent_name: str,
         working_context: list[dict[str, Any]],
         exec_ctx: ExecutionContext,
     ) -> tuple[list[dict[str, Any]], Optional[str]]:
+        """Añade al contexto los items ya normalizados por el provider
+        (incluidos los de reasoning) y clasifica tool calls y mensaje final."""
         function_calls = []
         final_message: Optional[str] = None
 
-        for item in response.output:
-            task = self._normalize_context_item(item.model_dump())
-            if task is None:
-                continue
+        for task in items:
             working_context.append(task)
             exec_ctx.context[agent_name].append(task)
 
             if task["type"] == "function_call":
                 function_calls.append(task)
             elif task["type"] == "message":
-                extracted_text = self._extract_message_text(task)
+                extracted_text = context_utils.extract_message_text(task)
                 if extracted_text:
                     final_message = extracted_text
 
@@ -403,10 +318,12 @@ class AgentRunner:
             tool_output = {
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": self._serialize_tool_result(result, requested_chars),
+                "output": context_utils.serialize_tool_result(result, requested_chars),
             }
             working_context.append(tool_output)
             exec_ctx.context[agent_name].append(tool_output)
+
+    # ── Ciclo de vida ──
 
     async def delete_session(self, session_id: str):
         await self.session_manager.delete_session(session_id)
@@ -422,16 +339,5 @@ class AgentRunner:
             await self.memory_rag.close()
         if self.conversation_store is not None:
             await self.conversation_store.close()
-        close_fn = getattr(self.client, "close", None)
-        if close_fn is not None:
-            res = close_fn()
-            if asyncio.iscoroutine(res):
-                await res
-
-    async def run_loop(self, session_id: str = "console_session"):
-        while True:
-            user_input = await asyncio.to_thread(input, f"\n\033[1;37m[{self.main_agent}] Tu mensaje: \033[0m")
-            start_time = time()
-            response = await self.process_message(session_id, user_input)
-            elapsed = time() - start_time
-            print(f"\n\033[1;32m{self.main_agent} ({elapsed:.3f} seg): \033[0m{response}")
+        for provider in self._providers.values():
+            await provider.close()

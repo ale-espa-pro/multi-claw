@@ -11,6 +11,9 @@ class ExecutionContext:
         self.conversation_type = conversation_type
         self.context: dict[str, list] = {name: [] for name in agent_names}
         self.token_tracker = TokenUsageTracker()
+        # System prompts construidos una vez por request (evita I/O de disco
+        # en cada iteración del loop del agente).
+        self.system_prompts: dict[str, str] = {}
 
 
 class SessionLockRegistry:
@@ -34,12 +37,6 @@ class SessionLockRegistry:
                 lock = asyncio.Lock()
                 self._memory_locks[session_id] = lock
             return lock
-
-    async def cleanup_session_lock(self, session_id: str):
-        async with self._locks_lock:
-            lock = self._session_locks.get(session_id)
-            if lock is not None and not lock.locked():
-                del self._session_locks[session_id]
 
     async def clear_session(self, session_id: str):
         async with self._locks_lock:

@@ -19,28 +19,53 @@ import tempfile
 import time
 import traceback
 import uuid
-from difflib import SequenceMatcher
 from typing import Any
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from app_paths import get_allowed_write_roots, get_playwright_output_dir, get_user_preferences_path
+from runner.images import IMAGE_EXT_TO_MIME, MAX_IMAGE_BYTES
 from tools.memoryTools.RAG_memory import MemoryRag
 from tools.memoryTools.semantic_splitter import count_tokens
+
 # ── Env / Clients / RAG ─────────────────────────────────────────────
 
 load_dotenv()
-RAG = MemoryRag()
-openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
 user_preferences_path = get_user_preferences_path()
+
+# Dependencias compartidas: la app las inyecta con configure(); si no,
+# se crean de forma perezosa en el primer uso (scripts, tests).
+_rag: MemoryRag | None = None
+_openai_client: AsyncOpenAI | None = None
+
+
+def configure(memory_rag: MemoryRag | None = None, openai_client: AsyncOpenAI | None = None):
+    global _rag, _openai_client
+    if memory_rag is not None:
+        _rag = memory_rag
+    if openai_client is not None:
+        _openai_client = openai_client
+
+
+def _get_rag() -> MemoryRag:
+    global _rag
+    if _rag is None:
+        _rag = MemoryRag()
+    return _rag
+
+
+def _get_openai_client() -> AsyncOpenAI:
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai_client
+
 
 # ── Constantes ───────────────────────────────────────────────────────
 
-SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 TEXT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml", ".sql"}
 DEFAULT_MAX_CHARS = 200_000
-DEFAULT_SEARCH_LIMIT = 50
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 12_000
 DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT = 40
 DEFAULT_PLAYWRIGHT_SESSION_TIMEOUT = 300
@@ -139,47 +164,6 @@ def _atomic_write_text(path: str, content: str, encoding: str) -> None:
 
 
 # ── Herramientas: Archivos ──────────────────────────────────────────
-
-def action_search_files(body: dict) -> dict:
-    """Busca archivos por nombre. Requiere: query. Opcional: root, limit."""
-    query = (body.get("query") or "").strip()
-    if not query:
-        return {"success": False, "error": "missing required field: query", "results": []}
-
-    root = body.get("root") or "."
-    limit = max(int(body.get("limit") or DEFAULT_SEARCH_LIMIT), 1)
-    terms = query.split()
-    q_cf = query.casefold()
-
-    def score(name: str) -> float:
-        n_cf = name.casefold()
-        exact = 1.0 if q_cf in n_cf else 0.0
-        coverage = sum(t.casefold() in n_cf for t in terms) / max(len(terms), 1)
-        fuzzy = SequenceMatcher(a=q_cf, b=n_cf).ratio()
-        return 0.9 * fuzzy + 0.8 * coverage + 0.6 * exact
-
-    results = []
-    try:
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-            for fn in filenames:
-                s = score(fn)
-                if s > 0.25:
-                    results.append({"path": os.path.join(dirpath, fn), "filename": fn, "score": s})
-
-        results.sort(key=lambda r: r["score"], reverse=True)
-        return {
-            "success": True,
-            "query": query,
-            "root": root,
-            "limit": limit,
-            "total_matches": len(results),
-            "remaining_results": max(len(results) - limit, 0),
-            "results": results[:limit],
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e), "results": []}
-
 
 def action_read_file(body: dict) -> dict:
     """Lee un archivo. Requiere: path. Opcional: max_chars."""
@@ -690,10 +674,6 @@ def _coerce_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
-def _truncate_text(text: str, max_chars: int) -> tuple[str, bool, int]:
-    return _clip_text_content(text, max_chars)
-
-
 def _playwright_output_dir(body: dict) -> str:
     requested = (body.get("output_dir") or "").strip()
     base = requested or get_playwright_output_dir()
@@ -720,7 +700,7 @@ async def _collect_playwright_snapshot(
             snapshot["text"],
             snapshot["text_truncated"],
             snapshot["text_remaining_chars"],
-        ) = _truncate_text(text, max_chars)
+        ) = _clip_text_content(text, max_chars)
         snapshot["text_remaining_tokens"] = _count_remaining_tokens(text, max_chars)
 
     if include_elements:
@@ -760,7 +740,7 @@ async def _collect_playwright_snapshot(
             snapshot["html"],
             snapshot["html_truncated"],
             snapshot["html_remaining_chars"],
-        ) = _truncate_text(html, max_chars)
+        ) = _clip_text_content(html, max_chars)
         snapshot["html_remaining_tokens"] = _count_remaining_tokens(html, max_chars)
 
     return snapshot
@@ -793,7 +773,7 @@ _PLAYWRIGHT_SESSIONS_LOCK = asyncio.Lock()
 
 def _serializable_preview(value: Any, max_chars: int = DEFAULT_PLAYWRIGHT_MAX_CHARS) -> Any:
     if isinstance(value, str):
-        clipped, truncated, remaining_chars = _truncate_text(value, max_chars)
+        clipped, truncated, remaining_chars = _clip_text_content(value, max_chars)
         if not truncated:
             return clipped
         return {
@@ -1263,7 +1243,7 @@ async def action_playwright_navigate(body: dict) -> dict:
                     await browser.close()
                     return {"success": False, "error": "selector required for 'get_text'"}
                 text = await page.inner_text(selector, timeout=timeout_ms)
-                result["text"], result["truncated"], result["remaining_chars"] = _truncate_text(text, max_chars)
+                result["text"], result["truncated"], result["remaining_chars"] = _clip_text_content(text, max_chars)
                 result["remaining_tokens"] = _count_remaining_tokens(text, max_chars)
 
             elif action == "screenshot":
@@ -1290,13 +1270,6 @@ async def action_playwright_navigate(body: dict) -> dict:
 
     except Exception as e:
         return {"success": False, "error": str(e), "url": url}
-
-
-MAX_IMAGE_BYTES = 20 * 1024 * 1024
-IMAGE_EXT_TO_MIME = {
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
-}
 
 
 def _resolve_image_source(source: str, explicit_mime: str | None) -> str:
@@ -1361,7 +1334,7 @@ async def action_interpret_image(body: dict) -> dict:
         return {"success": False, "error": f"cannot load image: {e}"}
 
     try:
-        response = await openai_client.responses.create(
+        response = await _get_openai_client().responses.create(
             model=model,
             input=[
                 {
@@ -1389,10 +1362,8 @@ async def action_memory_query(body: dict):
     if not sql:
         return {"success": False, "error": "Campo 'sql' requerido"}
     embed_text = (body.get("embed_text") or "").strip() or None
-    return await RAG.execute_safe_query(sql, embed_text=embed_text)
+    return await _get_rag().execute_safe_query(sql, embed_text=embed_text)
 
-def action_ask_user(body: dict):
-    raise body["question"]
 
 def action_save_preference(body: dict):
     def clean(value):
@@ -1503,32 +1474,18 @@ def action_save_preference(body: dict):
     except Exception as e:
         return {"success": False, "path": path, "error": str(e)}
 
-# ── Agentes (proxy pass-through) ────────────────────────────────────
-
-def _passthrough_agent(body: dict) -> str:
-    return json.dumps(body, ensure_ascii=False)
-
-
 # ── Dispatcher ───────────────────────────────────────────────────────
 
-_AGENTS = [
-    "ExecutorAgent", "WebSearchAgent", "DeviceManagerAgent",
-    "PlaywrightSessionAgent", "MCPManagerAgent",
-]
-
 ticket_dispatcher: dict[str, callable] = {
-    **{name: _passthrough_agent for name in _AGENTS},
     "read_file": action_read_file,
     "file_hash": action_file_hash,
     "write_file": action_write_file,
     "edit_file": action_edit_file,
     "run_command": action_run_command,
     "run_python": action_run_python,
-    "search_files": action_search_files,
     "web_fetch": action_web_fetch,
     "playwright_session": action_playwright_session,
     "playwright_navigate": action_playwright_navigate,
-    "ask_user": action_ask_user,
     "save_preference": action_save_preference,
     "memory_query": action_memory_query,
     "interpret_image": action_interpret_image,

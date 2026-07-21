@@ -13,6 +13,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import main as api_main
 from runner.agent_runner import AgentRunner
+from runner.execution import ExecutionContext
 
 
 class _FakeAgentBuilder:
@@ -34,11 +35,14 @@ class _FakeAgentBuilder:
     def get_agent_max_iterations(self, agent_name):
         return 10
 
-    def get_response_create_kwargs(self, agent_name):
+    def get_agent_params(self, agent_name):
         return {
             "model": "test-model",
+            "provider": None,
             "reasoning": {"effort": "low", "summary": "auto"},
             "parallel_tool_calls": False,
+            "max_output_tokens": 16_000,
+            "text": None,
         }
 
 
@@ -239,6 +243,32 @@ class RunnerConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(user_messages), 121)
         self.assertEqual(len(assistant_messages), 121)
+
+    async def test_one_failing_tool_does_not_cancel_the_batch(self):
+        runner = AgentRunner(client=_FakeClient(0), agent_builder=_FakeAgentBuilder())
+        runner.session_manager = _InMemorySessionManager()
+
+        async def ok_tool(body):
+            await asyncio.sleep(0.01)
+            return {"success": True}
+
+        def boom_tool(body):
+            raise RuntimeError("boom")
+
+        runner.agent_builder.ticket_dispatcher = {"ok_tool": ok_tool, "boom_tool": boom_tool}
+
+        calls = [
+            {"type": "function_call", "call_id": "c1", "name": "boom_tool", "arguments": "{}"},
+            {"type": "function_call", "call_id": "c2", "name": "ok_tool", "arguments": "{}"},
+        ]
+        exec_ctx = ExecutionContext("failing-tool-session", {"ExecutorAgent"})
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            results = await runner._execute_tools_parallel(calls, "ExecutorAgent", exec_ctx)
+
+        self.assertEqual(results["c2"], {"success": True})
+        self.assertIn("boom", results["c1"])
+        self.assertIn("RuntimeError", results["c1"])
 
 
 if __name__ == "__main__":

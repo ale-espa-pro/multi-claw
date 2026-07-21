@@ -30,9 +30,11 @@ README_DESCRIPTION_MAX_WORDS = 100
 
 DEFAULT_AGENT_PARAMS = {
     "model": "gpt-5.5",
+    "provider": None,  # None = inferido por el prefijo del modelo (claude-* -> anthropic)
     "reasoning": {"effort": "medium", "summary": "auto"},
     "parallel_tool_calls": False,
     "max_iterations": 10,
+    "max_output_tokens": 16_000,  # solo lo usa el provider de Anthropic (max_tokens obligatorio)
 }
 DEFAULT_RUNNER_CONFIG = {
     "max_iterations": 400,
@@ -60,9 +62,11 @@ class AgentBuilder:
         main: bool = False,
         json_response: bool = False,
         model: str | None = None,
+        provider: str | None = None,
         reasoning: dict | None = None,
         parallel_tool_calls: bool | None = None,
         max_iterations: int | None = None,
+        max_output_tokens: int | None = None,
         text: dict | None = None,
     ):
         merged_reasoning = {
@@ -77,6 +81,7 @@ class AgentBuilder:
             "tools": tools,
             "json_response": json_response,
             "model": model or self._defaults.get("model"),
+            "provider": provider or self._defaults.get("provider"),
             "reasoning": merged_reasoning,
             "parallel_tool_calls": (
                 bool(parallel_tool_calls)
@@ -87,6 +92,11 @@ class AgentBuilder:
                 int(max_iterations)
                 if max_iterations is not None
                 else int(self._defaults.get("max_iterations", 10))
+            ),
+            "max_output_tokens": int(
+                max_output_tokens
+                if max_output_tokens is not None
+                else self._defaults.get("max_output_tokens", 16_000)
             ),
             "text": text,
         }
@@ -124,9 +134,11 @@ class AgentBuilder:
                 main=cfg.get("main", False),
                 json_response=cfg.get("json_response", False),
                 model=cfg.get("model"),
+                provider=cfg.get("provider"),
                 reasoning=cfg.get("reasoning"),
                 parallel_tool_calls=cfg.get("parallel_tool_calls"),
                 max_iterations=cfg.get("max_iterations"),
+                max_output_tokens=cfg.get("max_output_tokens"),
                 text=cfg.get("text"),
             )
 
@@ -136,29 +148,23 @@ class AgentBuilder:
     def agent_names(self) -> set[str]:
         return set(self._agents.keys())
 
-    @property
-    def agent_tools(self) -> dict[str, list[str]]:
-        return {name: cfg["tools"] for name, cfg in self._agents.items()}
-
-    def uses_json_response(self, agent_name: str) -> bool:
-        return self._agents[agent_name]["json_response"]
-
     def get_runner_config(self) -> dict:
         return dict(self._runner_config)
 
     def get_agent_max_iterations(self, agent_name: str) -> int:
         return int(self._agents[agent_name]["max_iterations"])
 
-    def get_response_create_kwargs(self, agent_name: str) -> dict:
+    def get_agent_params(self, agent_name: str) -> dict:
+        """Parámetros de modelo del agente; cada provider mapea los suyos."""
         cfg = self._agents[agent_name]
-        kwargs = {
+        return {
             "model": cfg["model"],
+            "provider": cfg["provider"],
             "reasoning": cfg["reasoning"],
             "parallel_tool_calls": cfg["parallel_tool_calls"],
+            "max_output_tokens": cfg["max_output_tokens"],
+            "text": cfg.get("text"),
         }
-        if cfg.get("text"):
-            kwargs["text"] = cfg["text"]
-        return kwargs
 
     def get_tools_for_agent(self, agent_name: str) -> list[dict]:
         """Return tool schemas for an agent's tool list."""
@@ -185,20 +191,9 @@ class AgentBuilder:
             self._preferences_section(),
             self._working_dir_section(session_id, conversation_type),
             self._crons_section(),
-            self._worflows_section()
+            self._workflows_section()
         ]
         return "\n\n".join(p for p in parts if p)
-
-    def build_all_prompts(
-        self,
-        session_id: str,
-        conversation_type: str | None = None,
-    ) -> dict[str, str]:
-        """Build system prompts for all registered agents."""
-        return {
-            name: self.build_system_prompt(name, session_id, conversation_type)
-            for name in self._agents
-        }
 
     # ── Prompt sections ──
 
@@ -254,7 +249,7 @@ class AgentBuilder:
             )
         return "\n".join(lines)
 
-    def _worflows_section(self) -> str:
+    def _workflows_section(self) -> str:
         path = get_workflows_path(self.working_base) if self._working_base_override else get_workflows_path()
         if not path or not os.path.isdir(path):
             return ""
@@ -271,10 +266,6 @@ class AgentBuilder:
         if not cron_list:
             return ""
         return f"Agentes Cron programados:\n{cron_list}\n"
-
-    def _programing_tasks(self) -> str:
-
-        return f"Agentes Cron programados: \n -{cron_list} \n"
 
     @staticmethod
     def _preferences_section() -> str:

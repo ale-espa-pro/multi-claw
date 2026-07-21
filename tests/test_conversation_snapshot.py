@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from data.conversation_store import PostgresConversationStore
-from runner.agent_runner import AgentRunner
+from runner.images import build_user_message_item
 
 
 class ConversationSnapshotTests(unittest.TestCase):
@@ -11,7 +11,7 @@ class ConversationSnapshotTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         context = {
             "ExecutorAgent": [
-                AgentRunner._build_user_message_item("hola executor"),
+                build_user_message_item("hola executor"),
                 {
                     "type": "message",
                     "role": "assistant",
@@ -19,13 +19,13 @@ class ConversationSnapshotTests(unittest.TestCase):
                 },
             ],
             "DeviceManagerAgent": [
-                AgentRunner._build_user_message_item('{"query": "json interno 1"}'),
+                build_user_message_item('{"query": "json interno 1"}'),
                 {
                     "type": "message",
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": '{"ok": true}'}],
                 },
-                AgentRunner._build_user_message_item('{"query": "json interno 2"}'),
+                build_user_message_item('{"query": "json interno 2"}'),
             ],
         }
 

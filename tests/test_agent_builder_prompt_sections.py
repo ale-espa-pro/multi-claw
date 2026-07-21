@@ -33,7 +33,7 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
             (workflow_dir / "README.md").write_text("# Dashboard\nSin campo.", encoding="utf-8")
 
             with patch.dict(os.environ, {"WORKFLOW_PATH": tmpdir}):
-                section = AgentBuilder()._worflows_section()
+                section = AgentBuilder()._workflows_section()
 
         self.assertIn("Workflows creados:", section)
         self.assertIn("nombre: dashboard", section)
@@ -82,16 +82,18 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
         self.assertEqual(builder.get_agent_max_iterations("WebSearchAgent"), 5)
         self.assertEqual(builder.get_tools_for_agent("WebSearchAgent"), [{"type": "web_search"}])
 
-        executor_kwargs = builder.get_response_create_kwargs("ExecutorAgent")
-        self.assertEqual(executor_kwargs["model"], "executor-model")
-        self.assertEqual(executor_kwargs["reasoning"], {"effort": "high", "summary": "auto"})
-        self.assertFalse(executor_kwargs["parallel_tool_calls"])
-        self.assertNotIn("text", executor_kwargs)
+        executor_params = builder.get_agent_params("ExecutorAgent")
+        self.assertEqual(executor_params["model"], "executor-model")
+        self.assertEqual(executor_params["reasoning"], {"effort": "high", "summary": "auto"})
+        self.assertFalse(executor_params["parallel_tool_calls"])
+        self.assertIsNone(executor_params["text"])
+        self.assertIsNone(executor_params["provider"])
+        self.assertEqual(executor_params["max_output_tokens"], 16_000)
 
-        web_kwargs = builder.get_response_create_kwargs("WebSearchAgent")
-        self.assertEqual(web_kwargs["model"], "default-model")
-        self.assertTrue(web_kwargs["parallel_tool_calls"])
-        self.assertEqual(web_kwargs["text"], {"format": {"type": "json_object"}})
+        web_params = builder.get_agent_params("WebSearchAgent")
+        self.assertEqual(web_params["model"], "default-model")
+        self.assertTrue(web_params["parallel_tool_calls"])
+        self.assertEqual(web_params["text"], {"format": {"type": "json_object"}})
 
 
 if __name__ == "__main__":
