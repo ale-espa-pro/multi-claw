@@ -102,8 +102,12 @@ def normalize_full_context(
 ) -> dict[str, list[dict[str, Any]]]:
     if not isinstance(context, dict):
         context = {}
+    # Los agentes de enjambre crean carriles en caliente, así que las claves ya
+    # presentes en el contexto cuentan igual que los agentes estáticos: filtrarlas
+    # por agent_names borraría todo el trabajo del árbol al persistir.
+    lane_names = set(agent_names) | {key for key in context if isinstance(key, str)}
     normalized_context: dict[str, list[dict[str, Any]]] = {}
-    for agent_name in agent_names:
+    for agent_name in lane_names:
         raw_items = context.get(agent_name, [])
         if not isinstance(raw_items, list):
             raw_items = []
@@ -146,11 +150,15 @@ def build_context_delta(
     after_context: dict[str, Any],
     agent_names: set[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    before = normalize_full_context(before_context, agent_names)
-    after = normalize_full_context(after_context, agent_names)
+    lane_names = set(agent_names)
+    for raw in (before_context, after_context):
+        if isinstance(raw, dict):
+            lane_names |= {key for key in raw if isinstance(key, str)}
+    before = normalize_full_context(before_context, lane_names)
+    after = normalize_full_context(after_context, lane_names)
     delta: dict[str, list[dict[str, Any]]] = {}
 
-    for agent_name in agent_names:
+    for agent_name in lane_names:
         before_items = before.get(agent_name, [])
         after_items = after.get(agent_name, [])
         if after_items[:len(before_items)] == before_items:

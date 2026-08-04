@@ -32,6 +32,14 @@ class ToolContractTests(unittest.TestCase):
             for tool in agent_config.get("tools", [])
             if isinstance(tool, str)
         }
+        # Los nodos del enjambre son dinámicos: su toolset vive en _swarm.
+        swarm_config = config.get("_swarm") or {}
+        configured_tools |= {
+            tool
+            for key in ("tools", "shell_tools")
+            for tool in swarm_config.get(key, [])
+            if isinstance(tool, str)
+        }
 
         self.assertEqual(set(dict_total_tools), configured_tools)
         self.assertNotIn("MemoryAgent", dict_total_tools)

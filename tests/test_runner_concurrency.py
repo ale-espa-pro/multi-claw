@@ -32,6 +32,9 @@ class _FakeAgentBuilder:
             "max_iterations": 400,
         }
 
+    def get_swarm_config(self):
+        return {"max_iterations": 5, "max_depth": 2, "max_concurrent": 2, "max_budget": 50}
+
     def get_agent_max_iterations(self, agent_name):
         return 10
 

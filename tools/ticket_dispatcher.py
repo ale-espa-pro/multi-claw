@@ -26,6 +26,7 @@ from openai import AsyncOpenAI
 
 from app_paths import get_allowed_write_roots, get_playwright_output_dir, get_user_preferences_path
 from runner.images import IMAGE_EXT_TO_MIME, MAX_IMAGE_BYTES
+from runner.sandbox import get_write_root, is_within
 from tools.memoryTools.RAG_memory import MemoryRag
 from tools.memoryTools.semantic_splitter import count_tokens
 
@@ -105,13 +106,22 @@ def _resolve_path(path: str) -> str:
     return os.path.realpath(os.path.expandvars(os.path.expanduser(path)))
 
 
+def _write_denial(real_path: str) -> str | None:
+    """Motivo por el que una ruta no es escribible, o None si sí lo es.
+
+    Un agente confinado debe cumplir las dos condiciones: estar dentro de su
+    sandbox y dentro de los roots permitidos del despliegue.
+    """
+    write_root = get_write_root()
+    if write_root is not None and not is_within(real_path, write_root):
+        return f"sandbox violation: este agente solo puede escribir dentro de {write_root}"
+    if not any(is_within(real_path, root) for root in ALLOWED_WRITE_ROOTS):
+        return f"write not allowed outside: {ALLOWED_WRITE_ROOTS}"
+    return None
+
+
 def _is_under_allowed_root(real_path: str) -> bool:
-    real_path = os.path.realpath(real_path)
-    for root in ALLOWED_WRITE_ROOTS:
-        root_path = os.path.realpath(root)
-        if real_path == root_path or real_path.startswith(root_path + os.sep):
-            return True
-    return False
+    return _write_denial(real_path) is None
 
 
 def _file_hash(path: str) -> dict:
@@ -242,12 +252,9 @@ def action_write_file(body: dict) -> dict:
     # ✅ FIX: expandir ~ y $HOME antes de validar
     real_path = _resolve_path(path)
 
-    if not _is_under_allowed_root(real_path):
-        return {
-            "success": False,
-            "error": f"write not allowed outside: {ALLOWED_WRITE_ROOTS}",
-            "path": real_path,
-        }
+    denial = _write_denial(real_path)
+    if denial:
+        return {"success": False, "error": denial, "path": real_path}
 
     try:
         os.makedirs(os.path.dirname(real_path), exist_ok=True)
@@ -293,12 +300,9 @@ def action_edit_file(body: dict) -> dict:
 
     real_path = _resolve_path(path)
 
-    if not _is_under_allowed_root(real_path):
-        return {
-            "success": False,
-            "error": f"edit not allowed outside: {ALLOWED_WRITE_ROOTS}",
-            "path": real_path,
-        }
+    denial = _write_denial(real_path)
+    if denial:
+        return {"success": False, "error": denial, "path": real_path}
 
     if not os.path.isfile(real_path):
         return {"success": False, "error": f"file not found: {real_path}"}
@@ -509,7 +513,17 @@ async def action_run_command(body: dict) -> dict:
     timeout = min(int(body.get("timeout", 15)), 30)
 
     # ✅ FIX: expandir ~ y $HOME en workdir
-    workdir = _resolve_path(body.get("workdir") or "~")
+    # Un agente confinado arranca en su sandbox y no puede salir de él con workdir.
+    # El comando en sí no queda confinado: run_command solo se concede a ramas
+    # marcadas explícitamente como no confinadas (allow_shell en spawn_agent).
+    write_root = get_write_root()
+    workdir = _resolve_path(body.get("workdir") or write_root or "~")
+    if write_root is not None and not is_within(workdir, write_root):
+        return {
+            "success": False,
+            "error": f"sandbox violation: workdir debe estar dentro de {write_root}",
+            "workdir": workdir,
+        }
 
     blocked = _is_command_blocked(command)
     if blocked:

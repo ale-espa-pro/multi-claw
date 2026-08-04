@@ -102,7 +102,7 @@ MULTIAGENT_PG_SCHEMA=multiagente
 REDIS_URL=redis://localhost:6379
 ```
 
-Opcionales útiles: `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid`, `REDIS_CONTEXT_TTL_SECONDS`, `TOOL_OUTPUT_MAX_CHARS`, `TOOL_OUTPUT_HARD_MAX_CHARS`, `TWILIO_*`, `CRONS_PATH`, `WORKFLOW_PATH`, `USER_PREFERENCES_PATH`, `ALLOWED_WRITE_ROOTS`.
+Opcionales útiles: `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid`, `REDIS_CONTEXT_TTL_SECONDS`, `TOOL_OUTPUT_MAX_CHARS`, `TOOL_OUTPUT_HARD_MAX_CHARS`, `AGENT_API_CONCURRENCY`, `TWILIO_*`, `CRONS_PATH`, `WORKFLOW_PATH`, `USER_PREFERENCES_PATH`, `ALLOWED_WRITE_ROOTS`.
 
 ## Arranque Con Docker
 
@@ -173,6 +173,25 @@ La parte fuerte. Multi-Claw trata la memoria como historial consultable de ejecu
 5. Baja a `conversations.context_jsonb` cuando hace falta literalidad o cronología.
 
 El workflow `working-dir/workflows/memory_retrieval_tutorial` documenta el playbook de retrieval: clasificar intención, reducir espacio de búsqueda, combinar FTS/vector/híbrido y abrir JSON solo cuando compensa.
+
+## Enjambres De Agentes
+
+`deploy_swarm` despliega un árbol de agentes efímeros sobre un árbol de carpetas. La invariante es que **el `agent_id` de un agente es su ruta relativa**, así que jerarquía de agentes, de directorios y de carriles en `context_jsonb` son la misma cosa y el inspector reconstruye el árbol sin estado adicional.
+
+```text
+deploy_swarm(root_path=..., budget=12, task=...)
+└── auditoria                    escribe solo en auditoria/
+    ├── seguridad                escribe solo en auditoria/seguridad/
+    │   └── dependencias         escribe solo en auditoria/seguridad/dependencias/
+    └── rendimiento              escribe solo en auditoria/rendimiento/
+```
+
+- **Confinamiento.** Cada nodo solo puede escribir dentro de su carpeta; leer fuera sí está permitido. El límite viaja en un `ContextVar` que fija el runner, no en los argumentos de la tool, así que el modelo no puede falsificarlo. `run_command` no se concede por defecto porque ningún sandbox de rutas lo contiene; `allow_shell` lo habilita y marca esa rama como no confinada.
+- **Presupuesto.** `budget` es el número total de agentes (1-50), raíz incluida. Crear un hijo con `budget=k` cuesta `1+k` al padre y lo que el hijo no gasta se le devuelve al terminar. El tope lo lleva el servidor, no el prompt.
+- **REPORT.md.** Cada agente termina escribiendo un informe con resultado, artefactos, ejecuciones, limitaciones y siguientes pasos. El padre lo recibe ya leído en el resultado de la llamada. Si falta, el agente recibe un turno extra solo para escribirlo y, si sigue faltando, el resultado se marca como `report_missing`.
+- **Efímeros pero trazables.** Un nodo vive una sola invocación y su continuidad es el REPORT.md, pero su carril de contexto se persiste entero en `context_jsonb`: todo el árbol queda disponible para `memory_query` y para `/conversations/{id}/trace`.
+
+Se configura en el bloque `_swarm` de `agents/agent_config.json`: modelo, toolset, `max_depth`, `max_concurrent`, `max_budget` y `max_iterations`.
 
 ## Tests
 

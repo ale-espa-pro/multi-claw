@@ -39,6 +39,23 @@ DEFAULT_AGENT_PARAMS = {
 DEFAULT_RUNNER_CONFIG = {
     "max_iterations": 400,
 }
+# Plantilla de los agentes de enjambre. No se registra como agente porque sus
+# instancias son dinámicas: cada nodo del árbol hereda estos parámetros.
+DEFAULT_SWARM_CONFIG = {
+    "max_iterations": 25,
+    "max_depth": 4,
+    "max_concurrent": 6,
+    "max_budget": 50,
+    "report_max_chars": 20_000,
+    "parallel_tool_calls": True,
+    "tools": [
+        "read_file", "file_hash", "write_file", "edit_file", "run_python",
+        "web_fetch", "interpret_image", "memory_query", "spawn_agent",
+    ],
+    # Solo se conceden a ramas marcadas con allow_shell: run_command no queda
+    # confinado por el sandbox de rutas.
+    "shell_tools": ["run_command"],
+}
 
 
 class AgentBuilder:
@@ -48,6 +65,7 @@ class AgentBuilder:
         self._agents: dict[str, dict] = {}
         self._defaults: dict = dict(DEFAULT_AGENT_PARAMS)
         self._runner_config: dict = dict(DEFAULT_RUNNER_CONFIG)
+        self._swarm_config: dict = dict(DEFAULT_SWARM_CONFIG)
         self.main_agent: str | None = None
         self.dict_total_tools = dict_total_tools
         self.ticket_dispatcher = ticket_dispatcher
@@ -113,6 +131,10 @@ class AgentBuilder:
             **DEFAULT_RUNNER_CONFIG,
             **dict(configs.get("_runner") or {}),
         }
+        self._swarm_config = {
+            **DEFAULT_SWARM_CONFIG,
+            **dict(configs.get("_swarm") or {}),
+        }
         self._defaults = {
             **DEFAULT_AGENT_PARAMS,
             **dict(configs.get("_defaults") or {}),
@@ -153,6 +175,37 @@ class AgentBuilder:
 
     def get_agent_max_iterations(self, agent_name: str) -> int:
         return int(self._agents[agent_name]["max_iterations"])
+
+    def get_swarm_config(self) -> dict:
+        return dict(self._swarm_config)
+
+    def get_swarm_params(self, model: str | None = None) -> dict:
+        """Parámetros de modelo de un nodo del enjambre.
+
+        El modelo puede venir por nodo (spawn_agent lo acepta) para poder bajar
+        de gama en las ramas baratas sin tocar la configuración global.
+        """
+        cfg = self._swarm_config
+        return {
+            "model": model or cfg.get("model") or self._defaults.get("model"),
+            "provider": cfg.get("provider") or self._defaults.get("provider"),
+            "reasoning": {
+                **dict(self._defaults.get("reasoning") or {}),
+                **dict(cfg.get("reasoning") or {}),
+            },
+            "parallel_tool_calls": bool(cfg.get("parallel_tool_calls", True)),
+            "max_output_tokens": int(
+                cfg.get("max_output_tokens") or self._defaults.get("max_output_tokens", 16_000)
+            ),
+            "text": None,
+        }
+
+    def get_swarm_tools(self, allow_shell: bool = False) -> list[dict]:
+        cfg = self._swarm_config
+        names = list(cfg.get("tools") or [])
+        if allow_shell:
+            names += [name for name in (cfg.get("shell_tools") or []) if name not in names]
+        return [self.dict_total_tools[name] for name in names]
 
     def get_agent_params(self, agent_name: str) -> dict:
         """Parámetros de modelo del agente; cada provider mapea los suyos."""

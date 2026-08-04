@@ -71,6 +71,24 @@ def serialize_conversation_summary(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class TraceLaneItem(BaseModel):
+    kind: str
+    role: str | None = None
+    text: str | None = None
+    provider: str | None = None
+    name: str | None = None
+    call_id: str | None = None
+    arguments: Any | None = None
+    result: Any | None = None
+    target_agent: str | None = None
+
+
+class ConversationTrace(BaseModel):
+    session_id: str
+    agents: list[str]
+    lanes: dict[str, list[TraceLaneItem]]
+
+
 def serialize_conversation_detail(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "session_id": row["session_id"],

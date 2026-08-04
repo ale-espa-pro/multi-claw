@@ -1,12 +1,19 @@
 import asyncio
 
 from pricing.token_tracker import TokenUsageTracker
+from runner.swarm import SwarmRegistry
 
 
 class ExecutionContext:
     """Per-request isolated execution context."""
 
-    def __init__(self, session_id: str, agent_names: set[str], conversation_type: str | None = None):
+    def __init__(
+        self,
+        session_id: str,
+        agent_names: set[str],
+        conversation_type: str | None = None,
+        swarm_config: dict | None = None,
+    ):
         self.session_id = session_id
         self.conversation_type = conversation_type
         self.context: dict[str, list] = {name: [] for name in agent_names}
@@ -14,6 +21,18 @@ class ExecutionContext:
         # System prompts construidos una vez por request (evita I/O de disco
         # en cada iteración del loop del agente).
         self.system_prompts: dict[str, str] = {}
+        # Los agentes de enjambre añaden carriles en caliente: lane_names es el
+        # conjunto real a persistir, agent_names solo cubre los estáticos.
+        self.lane_names: set[str] = set(agent_names)
+        self.swarm = SwarmRegistry(swarm_config or {}, taken_ids=self.lane_names)
+
+    def register_lane(self, agent_id: str):
+        self.lane_names.add(agent_id)
+        self.context.setdefault(agent_id, [])
+
+    def adopt_lanes(self, context: dict[str, list]):
+        """Incorpora los carriles que ya venían persistidos de turnos previos."""
+        self.lane_names.update(key for key in context if isinstance(key, str))
 
 
 class SessionLockRegistry:

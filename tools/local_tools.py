@@ -504,6 +504,101 @@ total_tools = [
     },
     {
         "type": "function",
+        "name": "deploy_swarm",
+        "description": """Despliega un enjambre de agentes sobre un árbol de carpetas. Crea la carpeta raíz y lanza
+        el agente raíz, que a su vez podrá repartir su presupuesto entre subagentes con spawn_agent.
+        Cada agente del árbol solo puede escribir dentro de su propia subcarpeta y entrega un REPORT.md
+        con lo que hizo, sus limitaciones y los siguientes pasos.
+        El resultado incluye el REPORT.md del agente raíz ya leído, así que no hace falta un read_file extra.
+        Usar para trabajos amplios y paralelizables (auditar un repo, investigar varios frentes, generar
+        muchos artefactos). Para una tarea única y secuencial es más barato DeviceManagerAgent.""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "root_path": {
+                    "type": "string",
+                    "description": "Carpeta raíz del enjambre. Se crea si no existe. Todo el árbol vivirá dentro."
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Número total de agentes del enjambre, raíz incluida (1-50). El árbol nunca creará más."
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Objetivo completo para el agente raíz: qué hay que conseguir y qué criterios de éxito aplican."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Nombre corto del enjambre. Default: nombre de la carpeta raíz."
+                },
+                "extra_prompt": {
+                    "type": "string",
+                    "description": "System prompt adicional y breve para el agente raíz: reglas, formato o límites propios del encargo."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Modelo para el árbol. Default: el configurado en _swarm."
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Máximo de iteraciones del agente raíz. Default: el configurado en _swarm."
+                },
+                "allow_shell": {
+                    "type": "boolean",
+                    "description": "Concede run_command al árbol. Default false. ATENCIÓN: run_command no queda confinado por el sandbox de rutas, así que activarlo deja esa rama sin aislamiento real."
+                }
+            }
+        },
+        "required": ["root_path", "budget", "task"]
+    },
+    {
+        "type": "function",
+        "name": "spawn_agent",
+        "description": """Crea un subagente que trabaja en una subcarpeta de tu carpeta de trabajo y te devuelve su REPORT.md.
+        Solo disponible dentro de un enjambre y con presupuesto disponible.
+        Coste: crear un subagente con budget=k te resta 1+k (su plaza más lo que le cedes); lo que no gaste te
+        será devuelto cuando termine. Delega partes independientes del problema, no pasos consecutivos.""",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Nombre corto y descriptivo. Da nombre a su subcarpeta y a su agent_id."
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Mensaje de usuario del subagente: objetivo, contexto necesario y criterios de éxito. No podrá preguntarte nada, así que incluye todo lo que necesite."
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Agentes que le cedes para que delegue a su vez. 0 = agente hoja. Default 0."
+                },
+                "extra_prompt": {
+                    "type": "string",
+                    "description": "System prompt adicional y breve para este subagente: reglas, formato de salida o límites. Preferible corto."
+                },
+                "subpath": {
+                    "type": "string",
+                    "description": "Subcarpeta relativa a la tuya. Default: el nombre del agente. Debe quedar dentro de tu carpeta."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Modelo para este subagente. Útil para bajar de gama en ramas mecánicas."
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Máximo de iteraciones del subagente."
+                },
+                "allow_shell": {
+                    "type": "boolean",
+                    "description": "Concede run_command. Solo posible si tu propia rama ya lo tiene."
+                }
+            }
+        },
+        "required": ["name", "task"]
+    },
+    {
+        "type": "function",
         "name": "WebSearchAgent",
         "description": "Subagente dedicado a la busqueda Web especializado en busquedas generales e investigación",
         "parameters": {

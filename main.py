@@ -14,9 +14,10 @@ from agents.agent_builder import AgentBuilder
 from data.conversation_store import PostgresConversationStore
 from data.schemas import (
     ChatRequest, ChatResponse,
-    ConversationSummary, ConversationDetail,
+    ConversationSummary, ConversationDetail, ConversationTrace,
     serialize_conversation_summary, serialize_conversation_detail,
 )
+from data.trace_view import build_agent_trace
 from runner.agent_runner import AgentRunner
 from tools import ticket_dispatcher as ticket_dispatcher_module
 from tools.memoryTools.RAG_memory import MemoryRag
@@ -104,6 +105,11 @@ async def serve_index():
     return FileResponse("index.html")
 
 
+@app.get("/inspector")
+async def serve_inspector():
+    return FileResponse("inspector.html")
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, x_api_key: str | None = Header(default=None)):
     _require_api_key(x_api_key)
@@ -145,3 +151,13 @@ async def delete_conversation(session_id: str, x_api_key: str | None = Header(de
     _require_api_key(x_api_key)
     await runner.delete_session(session_id)
     return {"status": "deleted"}
+
+
+@app.get("/conversations/{session_id}/trace", response_model=ConversationTrace)
+async def get_conversation_trace(session_id: str, x_api_key: str | None = Header(default=None)):
+    _require_api_key(x_api_key)
+    conversation = await conversation_store.get_conversation(session_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    trace = build_agent_trace(conversation["context_jsonb"])
+    return {"session_id": session_id, **trace}

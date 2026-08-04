@@ -1,7 +1,9 @@
 import asyncio
+import contextlib
 import copy
 import inspect
 import json
+import os
 from typing import Any, Optional
 
 from agents.agent_builder import AgentBuilder
@@ -10,9 +12,14 @@ from data.redis_manager import RedisSessionManager
 from providers import AnthropicMessagesProvider, OpenAIResponsesProvider, resolve_provider_name
 from runner import context as context_utils
 from runner import images as image_utils
+from runner import swarm as swarm_utils
 from runner.execution import ExecutionContext, SessionLockRegistry
 from runner.memory import MemoryRetrievalConfig, MemoryService
+from runner.sandbox import write_root_scope
+from runner.swarm import SwarmError, SwarmNode
 from tools.memoryTools.RAG_memory import MemoryRag
+
+SWARM_TOOLS = {"deploy_swarm", "spawn_agent"}
 
 
 class AgentRunner:
@@ -40,7 +47,8 @@ class AgentRunner:
         self.session_manager = RedisSessionManager(redis_url=redis_url)
         self.conversation_store = conversation_store
         self.memory_rag = memory_rag
-        self._api_semaphore = asyncio.Semaphore(10)
+        self._swarm_config = agent_builder.get_swarm_config()
+        self._api_semaphore = asyncio.Semaphore(max(int(os.getenv("AGENT_API_CONCURRENCY", "10")), 1))
         self._background_tasks: set[asyncio.Task] = set()
         self._locks = SessionLockRegistry()
         self._memory_service = MemoryService(
@@ -99,9 +107,12 @@ class AgentRunner:
         session_lock = await self._locks.get_session_lock(session_id)
 
         async with session_lock:
-            exec_ctx = ExecutionContext(session_id, self.agent_names, conversation_type)
+            exec_ctx = ExecutionContext(
+                session_id, self.agent_names, conversation_type, swarm_config=self._swarm_config
+            )
             try:
                 exec_ctx.context = await self._load_complete_context(session_id)
+                exec_ctx.adopt_lanes(exec_ctx.context)
                 previous_context = copy.deepcopy(exec_ctx.context)
 
                 response = await self._chat(user_input, resolved_agent, exec_ctx, images=images)
@@ -135,23 +146,41 @@ class AgentRunner:
     async def _request_agent(
         self, agent_name: str, curr_context: list, exec_ctx: ExecutionContext
     ) -> list[dict[str, Any]]:
+        node = exec_ctx.swarm.get(agent_name)
         system_prompt = exec_ctx.system_prompts.get(agent_name)
         if system_prompt is None:
-            # build_system_prompt hace I/O de disco (preferencias, workflows,
-            # crons): se construye una sola vez por request y fuera del loop.
-            system_prompt = await asyncio.to_thread(
-                self.agent_builder.build_system_prompt,
-                agent_name,
-                exec_ctx.session_id,
-                exec_ctx.conversation_type,
-            )
+            if node is not None:
+                # Los nodos del enjambre no cargan preferencias, workflows ni crons:
+                # su prompt es corto a propósito porque se paga por cada agente.
+                system_prompt = swarm_utils.build_worker_prompt(
+                    node, int(self._swarm_config.get("max_depth", 4))
+                )
+            else:
+                # build_system_prompt hace I/O de disco (preferencias, workflows,
+                # crons): se construye una sola vez por request y fuera del loop.
+                system_prompt = await asyncio.to_thread(
+                    self.agent_builder.build_system_prompt,
+                    agent_name,
+                    exec_ctx.session_id,
+                    exec_ctx.conversation_type,
+                )
             exec_ctx.system_prompts[agent_name] = system_prompt
 
-        params = self.agent_builder.get_agent_params(agent_name)
-        tools = self.agent_builder.get_tools_for_agent(agent_name)
+        if node is not None:
+            params = self.agent_builder.get_swarm_params(node.model)
+            tools = self.agent_builder.get_swarm_tools(node.allow_shell)
+        else:
+            params = self.agent_builder.get_agent_params(agent_name)
+            tools = self.agent_builder.get_tools_for_agent(agent_name)
         provider = self._providers[resolve_provider_name(params)]
 
-        async with self._api_semaphore:
+        async with contextlib.AsyncExitStack() as stack:
+            if node is not None:
+                # Tope de concurrencia del enjambre. Se sostiene solo durante la
+                # llamada al proveedor y nunca mientras un padre espera a sus
+                # hijos, así que un árbol profundo no puede autobloquearse.
+                await stack.enter_async_context(exec_ctx.swarm.request_semaphore)
+            await stack.enter_async_context(self._api_semaphore)
             result = await provider.request(
                 system_prompt=system_prompt,
                 context=curr_context,
@@ -177,6 +206,14 @@ class AgentRunner:
                 f"{json.dumps(tool_arguments, ensure_ascii=False)}"
             )
             result = await self._run_subagent(tool_name, tool_arguments, exec_ctx)
+            return call_id, result
+
+        if tool_name in SWARM_TOOLS:
+            print(
+                f"\033[1;36m  [{caller_agent}] -> {tool_name.upper()}: \033[0m"
+                f"{json.dumps(tool_arguments, ensure_ascii=False)[:400]}"
+            )
+            result = await self._run_swarm_tool(tool_name, tool_arguments, caller_agent, exec_ctx)
             return call_id, result
 
         dispatcher = self.agent_builder.ticket_dispatcher
@@ -234,6 +271,123 @@ class AgentRunner:
         )
 
         return await self._run_agent_loop(agent_name, working_context, exec_ctx, max_iterations, subagent=True)
+
+    # ── Enjambre ──
+
+    async def _run_swarm_tool(
+        self,
+        tool_name: str,
+        arguments: Any,
+        caller_agent: str,
+        exec_ctx: ExecutionContext,
+    ) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            return {"success": False, "error": f"{tool_name} espera un objeto de argumentos"}
+
+        try:
+            if tool_name == "deploy_swarm":
+                node = await exec_ctx.swarm.create_root(
+                    root_path=arguments.get("root_path"),
+                    budget=arguments.get("budget"),
+                    task=arguments.get("task"),
+                    name=arguments.get("name"),
+                    extra_prompt=arguments.get("extra_prompt") or "",
+                    model=arguments.get("model"),
+                    max_iterations=arguments.get("max_iterations"),
+                    allow_shell=bool(arguments.get("allow_shell", False)),
+                )
+            else:
+                node = await exec_ctx.swarm.spawn(
+                    parent_id=caller_agent,
+                    name=arguments.get("name"),
+                    task=arguments.get("task"),
+                    budget=arguments.get("budget", 0),
+                    extra_prompt=arguments.get("extra_prompt") or "",
+                    subpath=arguments.get("subpath"),
+                    model=arguments.get("model"),
+                    max_iterations=arguments.get("max_iterations"),
+                    allow_shell=bool(arguments.get("allow_shell", False)),
+                )
+        except SwarmError as exc:
+            return {"success": False, "error": str(exc)}
+        except OSError as exc:
+            return {"success": False, "error": f"no se pudo preparar la carpeta de trabajo: {exc}"}
+
+        return await self._run_swarm_agent(node, exec_ctx)
+
+    async def _run_swarm_agent(self, node: SwarmNode, exec_ctx: ExecutionContext) -> dict[str, Any]:
+        """Ejecuta un nodo del árbol confinado a su carpeta y devuelve su informe.
+
+        El nodo es efímero: arranca con contexto limpio y su continuidad es el
+        REPORT.md. El carril sí se conserva en exec_ctx.context para la traza.
+        """
+        exec_ctx.register_lane(node.agent_id)
+        print(
+            f"\033[1;35m  ├─ SPAWN {node.agent_id} \033[0m"
+            f"(budget={node.budget}, depth={node.depth}) -> {node.root_path}"
+        )
+
+        user_message = image_utils.build_user_message_item(node.task)
+        working_context = [user_message]
+        exec_ctx.context[node.agent_id].append(user_message)
+
+        # El write-root se hereda por copia de contexto en cada tarea que se cree
+        # dentro del bloque, así que cubre también a los subagentes de esta rama.
+        try:
+            with write_root_scope(node.root_path):
+                final_message = await self._run_agent_loop(
+                    node.agent_id, working_context, exec_ctx, node.max_iterations, subagent=True
+                )
+                report = swarm_utils.read_report(node, exec_ctx.swarm.report_max_chars)
+
+                if report is None:
+                    nudge = image_utils.build_user_message_item(swarm_utils.REPORT_NUDGE)
+                    working_context.append(nudge)
+                    exec_ctx.context[node.agent_id].append(nudge)
+                    final_message = await self._run_agent_loop(
+                        node.agent_id,
+                        working_context,
+                        exec_ctx,
+                        swarm_utils.REPORT_NUDGE_ITERATIONS,
+                        subagent=True,
+                    ) or final_message
+                    report = swarm_utils.read_report(node, exec_ctx.swarm.report_max_chars)
+        except Exception as exc:
+            # Sin esto el presupuesto del nodo se quedaría bloqueado en el padre.
+            returned = await exec_ctx.swarm.settle(node, "failed")
+            print(f"\033[1;31m  └─ {node.agent_id} falló: {type(exc).__name__}: {exc}\033[0m")
+            return {
+                "success": False,
+                "agent_id": node.agent_id,
+                "path": node.root_path,
+                "status": "failed",
+                "budget_returned": returned,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        status = "completed" if report else "report_missing"
+        returned = await exec_ctx.swarm.settle(node, status)
+
+        result: dict[str, Any] = {
+            "success": True,
+            "agent_id": node.agent_id,
+            "path": node.root_path,
+            "status": status,
+            "budget_granted": node.granted,
+            "budget_returned": returned,
+            "final_message": final_message,
+        }
+        if node.spawned:
+            result["subagents"] = node.spawned
+        if report is not None:
+            result.update(report)
+        else:
+            result["report_missing"] = True
+            result["hint"] = (
+                f"El subagente no dejó {swarm_utils.REPORT_FILENAME} pese a pedírselo dos veces. "
+                "Trata final_message como no verificado o vuelve a delegar la tarea."
+            )
+        return result
 
     async def _chat(
         self,
