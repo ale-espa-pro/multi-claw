@@ -128,12 +128,12 @@ docker compose down
 
 ## Arranque Local Sin Docker
 
+Necesitas Python 3.11 o posterior y [`uv`](https://docs.astral.sh/uv/getting-started/installation/). Desde la raíz del proyecto:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uv sync --locked
+uv run playwright install chromium
+uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Si arrancas desde otro directorio, las rutas relativas de `.env` se resuelven respecto a la raíz del proyecto mediante `app_paths.py`.
@@ -196,7 +196,7 @@ Se configura en el bloque `_swarm` de `agents/agent_config.json`: modelo, toolse
 ## Tests
 
 ```bash
-python -m unittest
+uv run python -m unittest
 ```
 
 Los tests son unitarios. Conviene tener `OPENAI_API_KEY` definida aunque sea con un valor de desarrollo; no hacen llamadas reales a OpenAI.
@@ -210,7 +210,7 @@ Herramienta local con mucho poder. Antes de compartir: `CHAT_API_KEY`, CORS rest
 - `.env.example` sin secretos.
 - Modo `dev/prod` claro.
 - Healthcheck de API/DB/Redis/OpenAI.
-- CI con `python -m unittest` y build Docker.
+- CI con `uv run python -m unittest` y build Docker.
 - Benchmarks formales de memoria: recall, precisión, coste y temporalidad.
 - Hardening de tools, CORS, auth y permisos multiusuario.
 

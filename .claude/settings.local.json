@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(git -C /home/ale/multi-claw check-ignore working-dir/sessions)",
+      "Bash(python3 -m unittest discover -s tests -v)",
+      "Bash(sed -i 's/_worflows_section/_workflows_section/g' tests/test_agent_builder_prompt_sections.py)",
+      "Bash(python3 -m unittest discover -s tests)",
+      "Bash(OPENAI_API_KEY=test-key python3 -c ' *)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(pip install *)",
+      "Bash(python3 -c \"import anthropic; print\\(anthropic.__version__\\)\")",
+      "Bash(python3 -c \"import anthropic, inspect; print\\(anthropic.__version__\\)\")",
+      "Bash(python3 -)",
+      "Bash(xargs -I{} sh -c 'wc -l \"{}\" 2>/dev/null')",
+      "Bash(awk '{s+=$1} END {print s}')",
+      "Bash(python -m unittest tests.test_trace_view -v)",
+      "Bash(python -m unittest discover -v)",
+      "Bash(python -c ' *)",
+      "Bash(OPENAI_API_KEY=test python -m unittest)",
+      "Bash(OPENAI_API_KEY=test python -m unittest tests.test_swarm -v)",
+      "Bash(OPENAI_API_KEY=test python -m unittest tests.test_swarm)",
+      "Bash(OPENAI_API_KEY=test python -c ' *)"
+    ]
+  }
+}

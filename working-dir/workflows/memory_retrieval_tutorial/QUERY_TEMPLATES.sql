@@ -35,6 +35,156 @@ ORDER BY created_at DESC
 LIMIT 30;
 
 -- =====================================================
+-- 3A) Fallback seguro: respuesta assistant dentro de un chunk compuesto
+-- Ejecuta primero la consulta de prefijo anclado. Usa este fallback solo si
+-- devuelve cero resultados o señal incompleta.
+--
+-- Ajusta:
+--   <DOMAIN_TERMS>  regex específica del dominio solicitado.
+--
+-- IMPORTANTE: no devuelvas ni puntúes el chunk entero. regexp_split_to_table
+-- permite conservar solamente el payload posterior al ÚLTIMO marcador assistant.
+-- La salida queda deduplicada a 1 resultado por sesión.
+-- =====================================================
+WITH candidate_chunks AS (
+  SELECT session_id, message_order, created_at, chunck
+  FROM multiagente.conversation_chunks
+  WHERE chunck ~* '<DOMAIN_TERMS>'
+    AND chunck ~ '\[(DeviceManagerAgent|WebSearchAgent|PlaywrightSessionAgent) assistant:'
+), extracted_last_assistant AS (
+  SELECT
+    cc.session_id,
+    cc.message_order,
+    cc.created_at,
+    last_part.assistant_payload
+  FROM candidate_chunks cc
+  CROSS JOIN LATERAL (
+    SELECT BTRIM(part.payload) AS assistant_payload
+    FROM regexp_split_to_table(
+      cc.chunck,
+      '\[(DeviceManagerAgent|WebSearchAgent|PlaywrightSessionAgent) assistant:'
+    ) WITH ORDINALITY AS part(payload, ord)
+    WHERE part.ord > 1
+    ORDER BY part.ord DESC
+    LIMIT 1
+  ) AS last_part
+  WHERE last_part.assistant_payload <> ''
+    AND last_part.assistant_payload ~* '<DOMAIN_TERMS>'
+), ranked_per_session AS (
+  SELECT
+    session_id,
+    message_order,
+    created_at,
+    assistant_payload,
+    ROW_NUMBER() OVER (
+      PARTITION BY session_id
+      ORDER BY message_order DESC
+    ) AS session_rank
+  FROM extracted_last_assistant
+)
+SELECT
+  session_id,
+  message_order,
+  LEFT(assistant_payload, 320) AS assistant_sample
+FROM ranked_per_session
+WHERE session_rank = 1
+ORDER BY message_order DESC
+LIMIT 30;
+
+-- Si la extracción queda vacía, truncada o ambigua, abre context_jsonb
+-- únicamente para las sesiones afectadas.
+
+-- =====================================================
+-- 3B) Último resultado relevante/terminal, 1 por sesión
+-- NO equivale a MAX(message_order): primero aplica dominio, respuesta final
+-- de subagente y terminalidad; la recencia solo desempata evidencia comparable.
+--
+-- Ajusta:
+--   <DOMAIN_TERMS>  regex específica del objetivo, entidad o acción.
+--   Amplía terminal_score/discovery_signal con vocabulario del dominio.
+--
+-- created_at se conserva para auditoría, pero puede repetirse por ingesta batch.
+-- message_order es mejor desempate dentro de una sesión, no prueba de finalidad.
+-- =====================================================
+WITH domain_chunks AS (
+  SELECT session_id, message_order, created_at, chunck
+  FROM multiagente.conversation_chunks
+  WHERE chunck ~* '<DOMAIN_TERMS>'
+    AND chunck ~ '\[(DeviceManagerAgent|WebSearchAgent|PlaywrightSessionAgent) assistant:'
+), final_assistant_responses AS (
+  SELECT
+    dc.session_id,
+    dc.message_order,
+    dc.created_at,
+    last_part.assistant_payload
+  FROM domain_chunks dc
+  CROSS JOIN LATERAL (
+    SELECT BTRIM(part.payload) AS assistant_payload
+    FROM regexp_split_to_table(
+      dc.chunck,
+      '\[(DeviceManagerAgent|WebSearchAgent|PlaywrightSessionAgent) assistant:'
+    ) WITH ORDINALITY AS part(payload, ord)
+    WHERE part.ord > 1
+    ORDER BY part.ord DESC
+    LIMIT 1
+  ) AS last_part
+  WHERE last_part.assistant_payload <> ''
+    AND last_part.assistant_payload ~* '<DOMAIN_TERMS>'
+), scored AS (
+  SELECT
+    session_id,
+    message_order,
+    created_at,
+    assistant_payload,
+    CASE
+      WHEN assistant_payload ~* '(resultado[[:space:]_-]*final|confirmada|no_confirmada|completed|failed|blocked|localizador)'
+        THEN 300
+      WHEN assistant_payload ~* '((status|estado)[[:space:]]*["'']?[[:space:]]*[:=]|finalizado|completado|fallido|bloqueado)'
+        THEN 200
+      ELSE 0
+    END AS terminal_score,
+    CASE
+      WHEN assistant_payload ~* '(discovery|descubrimiento|recomendaci[oó]n|recommended|candidat[oa]s?|search results?|resultados? de b[uú]squeda)'
+        THEN 1
+      ELSE 0
+    END AS discovery_signal
+  FROM final_assistant_responses
+), terminal_candidates AS (
+  SELECT *
+  FROM scored
+  WHERE terminal_score > 0
+), ranked_terminal AS (
+  SELECT
+    session_id,
+    message_order,
+    created_at,
+    assistant_payload,
+    terminal_score,
+    discovery_signal,
+    ROW_NUMBER() OVER (
+      PARTITION BY session_id
+      ORDER BY terminal_score DESC,
+               discovery_signal ASC,
+               message_order DESC
+    ) AS session_rank
+  FROM terminal_candidates
+)
+SELECT
+  session_id,
+  message_order,
+  terminal_score,
+  discovery_signal,
+  LEFT(assistant_payload, 360) AS terminal_sample
+FROM ranked_terminal
+WHERE session_rank = 1
+ORDER BY terminal_score DESC, message_order DESC
+LIMIT 30;
+
+-- Si una sesión esperada no produce fila, o dos payloads terminales son
+-- incompatibles, abre puntualmente su context_jsonb. No promociones una
+-- recomendación reciente a resultado terminal por el mero orden cronológico.
+
+-- =====================================================
 -- 4) Archivos / resultados / artefactos
 -- =====================================================
 WITH focus AS (

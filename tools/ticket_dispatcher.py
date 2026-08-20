@@ -65,7 +65,29 @@ def _get_openai_client() -> AsyncOpenAI:
 
 # ── Constantes ───────────────────────────────────────────────────────
 
-TEXT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv", ".log", ".yaml", ".yml", ".sql"}
+TEXT_EXTENSIONS = {
+    ".txt", ".md", ".markdown", ".rst", ".py", ".pyi", ".json", ".jsonl", ".csv", ".tsv",
+    ".log", ".yaml", ".yml", ".sql", ".toml", ".ini", ".cfg", ".conf", ".env", ".properties",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html", ".htm",
+    ".css", ".scss", ".sass", ".less", ".xml", ".svg", ".graphql", ".gql", ".proto",
+    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+    ".c", ".h", ".cpp", ".cxx", ".cc", ".hpp", ".hxx", ".cs", ".java", ".kt", ".kts",
+    ".go", ".rs", ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".swift", ".scala", ".dart",
+    ".ex", ".exs", ".erl", ".clj", ".hs", ".ml", ".tf", ".hcl", ".make", ".mk", ".cmake",
+    ".gitignore", ".dockerignore", ".editorconfig",
+}
+# Extensiones que siempre tratamos como binarias: ni siquiera olfateamos el
+# contenido para evitar volcar ficheros grandes en el contexto.
+BINARY_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif", ".tiff", ".heic",
+    ".mp3", ".mp4", ".m4a", ".avi", ".mov", ".mkv", ".webm", ".wav", ".flac", ".ogg",
+    ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".tar", ".jar", ".war",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".class", ".wasm",
+    ".pyc", ".pyo", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".sqlite", ".sqlite3", ".db", ".parquet", ".npy", ".npz", ".pkl", ".pickle",
+}
+# Muestra de bytes para decidir texto vs binario en extensiones desconocidas.
+TEXT_SNIFF_BYTES = 8192
 DEFAULT_MAX_CHARS = 200_000
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 12_000
 DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT = 40
@@ -193,8 +215,12 @@ def action_read_file(body: dict) -> dict:
         reader = _FILE_READERS.get(ext)
         if reader:
             result = reader(path, mime, max_chars)
-        else:
+        elif ext in BINARY_EXTENSIONS or _looks_binary(path):
             result = _read_binary(path, mime)
+        else:
+            # Extensión desconocida pero contenido textual (código, config,
+            # ficheros sin extensión como Dockerfile/Makefile): leer como texto.
+            result = _read_text(path, mime, max_chars)
         if result.get("success"):
             result["file_hash"] = _file_hash(path)
         return result
@@ -477,6 +503,16 @@ def _read_binary(path: str, mime: str) -> dict:
     }
 
 
+def _looks_binary(path: str) -> bool:
+    """Heurística tipo git: un byte NUL en la primera muestra ⇒ binario."""
+    try:
+        with open(path, "rb") as f:
+            sample = f.read(TEXT_SNIFF_BYTES)
+    except OSError:
+        return True
+    return b"\x00" in sample
+
+
 _FILE_READERS = {
     **{ext: _read_text for ext in TEXT_EXTENSIONS},
     ".pdf": _read_pdf,
@@ -604,18 +640,38 @@ def action_run_python(body: dict) -> dict:
 
     start = time.perf_counter()
     p.start()
-    p.join(timeout)
+
+    # Drenamos la cola ANTES de join: multiprocessing.Queue vuelca el objeto
+    # en un hilo alimentador y el hijo no termina hasta que el pipe se lee, así
+    # que un join previo se colgaría (timeout falso) con salidas > ~64KB.
+    result_tuple = None
+    timed_out = False
+    deadline = start + timeout
+    while True:
+        try:
+            result_tuple = q.get(timeout=0.05)
+            break
+        except queue.Empty:
+            if not p.is_alive():
+                # El proceso terminó; intento final por si dejó el resultado.
+                with contextlib.suppress(queue.Empty):
+                    result_tuple = q.get_nowait()
+                break
+            if time.perf_counter() >= deadline:
+                timed_out = True
+                break
     elapsed = time.perf_counter() - start
 
-    if p.is_alive():
-        p.kill()
+    if timed_out:
+        if p.is_alive():
+            p.kill()
         p.join()
         return {"success": False, "error": "timeout exceeded", "execution_time": elapsed}
 
-    try:
-        success, stdout, result, tb = q.get_nowait()
-    except queue.Empty:
+    p.join()
+    if result_tuple is None:
         return {"success": False, "error": "no result returned", "execution_time": elapsed}
+    success, stdout, result, tb = result_tuple
 
     resp = {"success": success, "stdout": stdout, "execution_time": elapsed}
     if success:

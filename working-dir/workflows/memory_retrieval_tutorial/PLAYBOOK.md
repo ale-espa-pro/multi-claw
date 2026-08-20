@@ -180,6 +180,34 @@ La vectorial mejora mucho cuando ya has filtrado por:
 - longitud
 - fecha o shortlist de sesiones
 
+### F. Chunks compuestos: extraer la última respuesta de subagente
+
+Un chunk puede agrupar varias trazas: prompt, llamadas de herramienta, outputs y una respuesta final de subagente. Por tanto, una respuesta útil no siempre está anclada al inicio.
+
+Fallback seguro y barato:
+1. Prueba primero el prefijo anclado habitual (`^\[... assistant:`).
+2. Si devuelve cero resultados o señal incompleta, busca dentro del chunk el marcador `\[(DeviceManagerAgent|WebSearchAgent|PlaywrightSessionAgent) assistant:`.
+3. Si hay varios marcadores assistant, extrae **solamente lo posterior al último marcador** y aplica sobre ese payload el gating, scoring, preview y ranking.
+4. Si la extracción queda vacía, truncada o ambigua, abre puntualmente `context_jsonb` para esa sesión.
+
+**No puntúes ni devuelvas el chunk compuesto completo tras detectar un marcador interno.** Un marcador interno sin extracción puede mezclar el prompt original, tool traces, recomendaciones intermedias y la respuesta final, causando atribuciones o estados falsos.
+
+### G. “Último resultado” significa último relevante/terminal
+
+No uses ingenuamente `MAX(message_order)` ni el chunk cronológicamente último para inferir el resultado final de una sesión. La recencia debe aplicarse **después** del gating de dominio, tipo de respuesta y terminalidad.
+
+Pipeline recomendado:
+1. Filtra al dominio solicitado.
+2. Conserva respuestas finales de subagente; para chunks compuestos, normaliza al payload posterior al último marcador assistant.
+3. Puntúa por encima las señales terminales: `status`, `confirmada`/`no_confirmada`, `completed`/`failed`/`blocked`, `localizador`, `resultado final` y equivalentes específicos del dominio.
+4. Deja descubrimiento, búsqueda, candidatos y recomendaciones por debajo; para una consulta estrictamente terminal, exclúyelos si no contienen evidencia terminal.
+5. Solo entre evidencias terminales comparables usa `message_order DESC`, devolviendo **1 resultado por sesión**.
+6. Si faltan señales, hay estados incompatibles o el payload no permite atribución fiable, abre solo el `context_jsonb` de las sesiones conflictivas.
+
+`created_at` puede ser idéntico para varios chunks por ingesta batch. `message_order` suele ser mejor desempate dentro de la sesión, pero **no demuestra por sí solo finalidad**.
+
+Aprendizaje genérico: el chunk con mayor `message_order` puede contener una respuesta de búsqueda o recomendación, mientras un chunk anterior conserva el estado operativo terminal. Elegir primero por recencia invierte la prioridad semántica y devuelve el resultado equivocado.
+
 ## Troubleshooting / errores frecuentes
 
 - Los guards de operaciones pueden hacer matching léxico sobre keywords incluso dentro de literales SQL. Evita términos DML destructivos en strings de búsqueda; usa sinónimos neutros, filtros `ILIKE` alternativos o búsquedas separadas.
@@ -275,6 +303,8 @@ Trata el **EXTRA DE MEMORIA AUTOMÁTICA** como una pista:
 - ¿Necesito de verdad literal exacto del usuario?
 - ¿Me conviene 1 resultado por sesión para cubrir más?
 - ¿Ya filtré por tipo de chunk y por longitud?
+- ¿Si el marcador assistant es interno, extraje solo lo posterior al último marcador?
+- ¿Apliqué recencia después del gating de dominio y terminalidad?
 - ¿Puedo aplicar gating estructural antes de vectorial?
 - ¿Estoy tratando el retrieval automático como pista y no como verdad?
 - ¿Estoy evitando depender de nombres concretos de proyectos ya vistos?
@@ -288,6 +318,8 @@ Ahí están las plantillas para:
 - sesiones recientes
 - mensajes del usuario desde `context_jsonb`
 - trazas de agentes por prefijo anclado
+- fallback de marcador assistant interno con extracción del último payload
+- último resultado relevante/terminal con 1 resultado por sesión
 - archivos/resultados/artefactos
 - estado/progreso
 - vectorial híbrida sobre subconjunto filtrado
@@ -306,3 +338,22 @@ El patrón más reusable de este workflow es:
 6. `context_jsonb` solo cuando haga falta precisión literal o cronología.
 
 Si dudas entre dos enfoques, elige el que **reduzca antes el espacio de búsqueda**.
+
+## Retrieval complejo con filtrado Python y acciones externas
+
+1. Usa la DB y `conversation_chunks` solo como router inicial: devuelve IDs y previews cortas, no conversaciones completas.
+2. Abre `context_jsonb` únicamente para las sesiones candidatas y filtra/normaliza el resultado en Python.
+3. Para acciones externas (por ejemplo, Gmail), exige evidencia terminal de ejecución (`status=sent`, `enviado=true`, `returncode=0` o equivalente). No bastan `from:me`, `SENT`, un borrador, código de ejemplo ni una búsqueda.
+4. Deduplica los eventos reales con `message_id`/`threadId` y separa explícitamente confirmados de ambiguos.
+5. Si una delegación Python agota iteraciones, reduce el trabajo a las sesiones/IDs ya localizados en vez de repetir una búsqueda global.
+
+## Conteo exacto de tokens
+
+- «Exacto» siempre depende del tokenizer y de su versión; fija y reporta ambos para que el resultado sea reproducible.
+- Para `context_jsonb`, cuenta el texto serializado por PostgreSQL con `context_jsonb::text`, usando un tokenizer explícitamente fijado (por ejemplo, `tiktoken` con `cl100k_base`) y `encode_ordinary`.
+- Reporta `conversation_chunks.chunck` por separado: puede estar derivado de `context_jsonb` o solaparse con él, así que su suma no equivale a tokens únicos. Como mucho, informa la suma aritmética etiquetada como tal.
+- Haz el recuento sobre una instantánea consistente y de solo lectura (por ejemplo, `REPEATABLE READ READ ONLY`), recorriendo los datos sin truncación y sin exponer texto, datos personales ni secretos.
+
+## Nota operativa de auditoría de chunks
+
+`conversation_chunks` no debe tratarse como un espejo 1:1 de `context_jsonb`: el pipeline puede serializar solo deltas y ciertos tipos de elementos, agrupar semánticamente y escribir de forma asíncrona. Antes de inferir pérdida de embeddings, comprueba la cobertura por sesión, las sesiones sin chunks y `embedding IS NOT NULL` junto con su dimensión declarada/observada.

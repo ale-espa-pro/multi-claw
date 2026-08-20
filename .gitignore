@@ -18,6 +18,7 @@ docker-compose.local.yml
 .codex
 __pycache__/
 *.py[cod]
+.venv/
 .pytest_cache/
 .mypy_cache/
 .ipynb_checkpoints/

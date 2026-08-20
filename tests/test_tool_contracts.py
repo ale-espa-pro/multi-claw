@@ -11,6 +11,7 @@ from tools.ticket_dispatcher import (
     action_edit_file,
     action_file_hash,
     action_read_file,
+    action_run_python,
     action_save_preference,
     action_web_fetch,
     ticket_dispatcher,
@@ -256,6 +257,67 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(read["content"], "ab")
             self.assertEqual(read["remaining_chars"], 4)
             self.assertGreater(read["remaining_tokens"], 0)
+
+    def test_read_file_reads_code_and_config_by_content(self):
+        # Extensiones fuera del set clásico y ficheros sin extensión deben
+        # devolver contenido de texto, no un stub binario.
+        samples = {
+            "app.js": "console.log('hi');\n",
+            "main.ts": "export const x: number = 1;\n",
+            "index.html": "<html><body>hi</body></html>\n",
+            "config.toml": "[server]\nport = 8000\n",
+            ".env": "SECRET=abc\n",
+            "Dockerfile": "FROM python:3.11\n",
+            "Makefile": "all:\n\techo build\n",
+            "README": "readme sin extension\n",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name, content in samples.items():
+                path = Path(tmpdir) / name
+                path.write_text(content, encoding="utf-8")
+                read = action_read_file({"path": str(path)})
+                with self.subTest(file=name):
+                    self.assertTrue(read["success"])
+                    self.assertEqual(read["kind"], "text")
+                    self.assertEqual(read["content"], content)
+
+    def test_read_file_treats_binary_content_and_extensions_as_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Extensión binaria conocida.
+            png = Path(tmpdir) / "img.png"
+            png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00stuff")
+            png_read = action_read_file({"path": str(png)})
+            self.assertTrue(png_read["success"])
+            self.assertEqual(png_read["kind"], "binary")
+            self.assertTrue(png_read["preview_omitted"])
+            self.assertNotIn("content", png_read)
+
+            # Extensión desconocida pero con byte NUL => binario por olfateo.
+            blob = Path(tmpdir) / "weird.dat"
+            blob.write_bytes(b"ABC\x00\x01\x02binary")
+            blob_read = action_read_file({"path": str(blob)})
+            self.assertEqual(blob_read["kind"], "binary")
+            self.assertTrue(blob_read["preview_omitted"])
+
+    def test_run_python_returns_large_output_without_false_timeout(self):
+        # Salidas mayores que el buffer del pipe no deben reportarse como timeout.
+        result = action_run_python({"code": "RESULT = 'x' * 300000", "timeout": 5})
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["result"], "x" * 300000)
+
+    def test_run_python_still_times_out_on_infinite_loop(self):
+        result = action_run_python({"code": "while True:\n    pass", "timeout": 1})
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "timeout exceeded")
+        self.assertLess(result["execution_time"], 3)
+
+    def test_run_python_reports_execution_errors(self):
+        result = action_run_python({"code": "1 / 0"})
+
+        self.assertFalse(result["success"])
+        self.assertIn("ZeroDivisionError", result["error"])
 
     def test_read_file_remaining_chars_is_zero_when_not_truncated(self):
         with tempfile.TemporaryDirectory() as tmpdir:

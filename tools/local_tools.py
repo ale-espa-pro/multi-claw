@@ -111,7 +111,7 @@ total_tools = [
     {
         "type": "function",
         "name": "read_file",
-        "description": "Read and extract content from files like pdf, pptx, docx, csv, xlsx, txt, images. Textual results include remaining_chars and remaining_tokens for content not shown after max_chars. Always returns file_hash md5 for the file read.",
+        "description": "Read and extract content from files: documents (pdf, pptx, docx, xlsx), data (csv, tsv, json) and any text/code/config file (py, js, ts, html, css, sh, toml, yaml, .env, Dockerfile, Makefile, files without extension, etc.). Files whose content looks binary (or known binary extensions like images/archives/executables) return metadata only, without dumping bytes. Textual results include remaining_chars and remaining_tokens for content not shown after max_chars. Always returns file_hash md5 for the file read.",
         "parameters": {
             "type": "object",
             "properties": {
