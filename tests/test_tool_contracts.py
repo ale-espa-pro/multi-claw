@@ -8,14 +8,9 @@ from pathlib import Path
 from runner.context import serialize_tool_result
 from tools.local_tools import dict_total_tools
 from tools.ticket_dispatcher import (
-    action_edit_file,
-    action_file_hash,
-    action_read_file,
-    action_run_python,
     action_save_preference,
     action_web_fetch,
     ticket_dispatcher,
-    action_write_file,
     _resolve_image_source,
     _clip_text_content,
 )
@@ -62,6 +57,24 @@ class ToolContractTests(unittest.TestCase):
                     set(parameters["properties"]),
                 )
 
+    def test_terminal_replaces_removed_file_and_python_tools(self):
+        removed_tools = {"run_python", "read_file", "write_file", "file_hash"}
+
+        self.assertTrue(removed_tools.isdisjoint(dict_total_tools))
+        self.assertTrue(removed_tools.isdisjoint(ticket_dispatcher))
+        self.assertIn("run_command", dict_total_tools)
+        self.assertIn("run_command", ticket_dispatcher)
+
+    def test_edit_file_schema_exposes_inspect_and_guarded_edit(self):
+        parameters = dict_total_tools["edit_file"]["parameters"]
+        properties = parameters["properties"]
+
+        self.assertEqual(set(properties["action"]["enum"]), {"inspect", "edit"})
+        self.assertIn("expected_file_hash", properties)
+        self.assertIn("offset", properties)
+        self.assertEqual(set(parameters["required"]), {"path", "action"})
+        self.assertIn("edit_file", ticket_dispatcher)
+
     def test_playwright_schema_defaults_to_compact_outputs(self):
         tool = dict_total_tools["playwright_navigate"]
         properties = tool["parameters"]["properties"]
@@ -98,71 +111,6 @@ class ToolContractTests(unittest.TestCase):
         url = "https://example.com/image.png"
 
         self.assertEqual(_resolve_image_source(url, None), url)
-
-    def test_file_hash_tool_is_registered(self):
-        tool = dict_total_tools["file_hash"]
-
-        self.assertEqual(tool["name"], "file_hash")
-        self.assertIn("compare_to", tool["parameters"]["properties"])
-        self.assertNotIn("algorithm", tool["parameters"]["properties"])
-
-    def test_file_tools_return_file_hash(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = str(Path(tmpdir) / "note.txt")
-
-            written = action_write_file({"path": path, "content": "hola"})
-            self.assertTrue(written["success"])
-            self.assertIn("file_hash", written)
-            self.assertEqual(written["file_hash"]["algorithm"], "md5")
-            first_hash = written["file_hash"]["value"]
-
-            read = action_read_file({"path": path})
-            self.assertTrue(read["success"])
-            self.assertEqual(read["file_hash"]["value"], first_hash)
-
-            unchanged = action_file_hash({"path": path, "compare_to": first_hash})
-            self.assertTrue(unchanged["success"])
-            self.assertFalse(unchanged["changed"])
-
-            edited = action_edit_file({
-                "path": path,
-                "old_text": "hola",
-                "new_text": "adios",
-                "expected_file_hash": first_hash,
-            })
-            self.assertTrue(edited["success"])
-            self.assertIn("file_hash", edited)
-            self.assertNotEqual(edited["file_hash"]["value"], first_hash)
-
-    def test_edit_file_rejects_a_stale_hash(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "note.txt"
-            created = action_write_file({"path": str(path), "content": "first"})
-            stale_hash = created["file_hash"]["value"]
-            path.write_text("changed elsewhere", encoding="utf-8")
-
-            result = action_edit_file({
-                "path": str(path),
-                "old_text": "changed elsewhere",
-                "new_text": "agent edit",
-                "expected_file_hash": stale_hash,
-            })
-
-            self.assertFalse(result["success"])
-            self.assertEqual(result["error"], "file_conflict")
-            self.assertEqual(path.read_text(encoding="utf-8"), "changed elsewhere")
-            self.assertNotEqual(result["current_file_hash"], stale_hash)
-
-    def test_write_file_requires_current_hash_for_existing_file(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "note.txt"
-            action_write_file({"path": str(path), "content": "original"})
-
-            rejected = action_write_file({"path": str(path), "content": "replacement"})
-
-            self.assertFalse(rejected["success"])
-            self.assertEqual(rejected["error"], "file_conflict")
-            self.assertEqual(path.read_text(encoding="utf-8"), "original")
 
     def test_global_tool_output_limit_returns_counts(self):
         import unittest.mock
@@ -244,92 +192,6 @@ class ToolContractTests(unittest.TestCase):
                 self.assertIn("Rutas de fotos del DNI", content)
             finally:
                 dispatcher.user_preferences_path = original_path
-
-    def test_read_file_returns_remaining_chars(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = str(Path(tmpdir) / "long.txt")
-            Path(path).write_text("abcdef", encoding="utf-8")
-
-            read = action_read_file({"path": path, "max_chars": 2})
-
-            self.assertTrue(read["success"])
-            self.assertTrue(read["truncated"])
-            self.assertEqual(read["content"], "ab")
-            self.assertEqual(read["remaining_chars"], 4)
-            self.assertGreater(read["remaining_tokens"], 0)
-
-    def test_read_file_reads_code_and_config_by_content(self):
-        # Extensiones fuera del set clásico y ficheros sin extensión deben
-        # devolver contenido de texto, no un stub binario.
-        samples = {
-            "app.js": "console.log('hi');\n",
-            "main.ts": "export const x: number = 1;\n",
-            "index.html": "<html><body>hi</body></html>\n",
-            "config.toml": "[server]\nport = 8000\n",
-            ".env": "SECRET=abc\n",
-            "Dockerfile": "FROM python:3.11\n",
-            "Makefile": "all:\n\techo build\n",
-            "README": "readme sin extension\n",
-        }
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for name, content in samples.items():
-                path = Path(tmpdir) / name
-                path.write_text(content, encoding="utf-8")
-                read = action_read_file({"path": str(path)})
-                with self.subTest(file=name):
-                    self.assertTrue(read["success"])
-                    self.assertEqual(read["kind"], "text")
-                    self.assertEqual(read["content"], content)
-
-    def test_read_file_treats_binary_content_and_extensions_as_binary(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Extensión binaria conocida.
-            png = Path(tmpdir) / "img.png"
-            png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00stuff")
-            png_read = action_read_file({"path": str(png)})
-            self.assertTrue(png_read["success"])
-            self.assertEqual(png_read["kind"], "binary")
-            self.assertTrue(png_read["preview_omitted"])
-            self.assertNotIn("content", png_read)
-
-            # Extensión desconocida pero con byte NUL => binario por olfateo.
-            blob = Path(tmpdir) / "weird.dat"
-            blob.write_bytes(b"ABC\x00\x01\x02binary")
-            blob_read = action_read_file({"path": str(blob)})
-            self.assertEqual(blob_read["kind"], "binary")
-            self.assertTrue(blob_read["preview_omitted"])
-
-    def test_run_python_returns_large_output_without_false_timeout(self):
-        # Salidas mayores que el buffer del pipe no deben reportarse como timeout.
-        result = action_run_python({"code": "RESULT = 'x' * 300000", "timeout": 5})
-
-        self.assertTrue(result["success"], result)
-        self.assertEqual(result["result"], "x" * 300000)
-
-    def test_run_python_still_times_out_on_infinite_loop(self):
-        result = action_run_python({"code": "while True:\n    pass", "timeout": 1})
-
-        self.assertFalse(result["success"])
-        self.assertEqual(result["error"], "timeout exceeded")
-        self.assertLess(result["execution_time"], 3)
-
-    def test_run_python_reports_execution_errors(self):
-        result = action_run_python({"code": "1 / 0"})
-
-        self.assertFalse(result["success"])
-        self.assertIn("ZeroDivisionError", result["error"])
-
-    def test_read_file_remaining_chars_is_zero_when_not_truncated(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = str(Path(tmpdir) / "short.txt")
-            Path(path).write_text("hola", encoding="utf-8")
-
-            read = action_read_file({"path": path, "max_chars": 10})
-
-            self.assertTrue(read["success"])
-            self.assertFalse(read["truncated"])
-            self.assertEqual(read["remaining_chars"], 0)
-            self.assertEqual(read["remaining_tokens"], 0)
 
     def test_truncate_text_returns_remaining_chars(self):
         content, truncated, remaining = _clip_text_content("abcdef", 2)

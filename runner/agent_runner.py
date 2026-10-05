@@ -195,6 +195,13 @@ class AgentRunner:
         tool_name = tool_call["name"]
         call_id = tool_call["call_id"]
 
+        node = exec_ctx.swarm.get(caller_agent)
+        if tool_name == "run_command" and node is not None and not node.allow_shell:
+            return call_id, {
+                "success": False,
+                "error": "run_command is disabled for this swarm branch (allow_shell=false)",
+            }
+
         try:
             tool_arguments = json.loads(tool_call["arguments"])
         except json.JSONDecodeError:
@@ -294,7 +301,7 @@ class AgentRunner:
                     extra_prompt=arguments.get("extra_prompt") or "",
                     model=arguments.get("model"),
                     max_iterations=arguments.get("max_iterations"),
-                    allow_shell=bool(arguments.get("allow_shell", False)),
+                    allow_shell=arguments.get("allow_shell", True),
                 )
             else:
                 node = await exec_ctx.swarm.spawn(
@@ -306,7 +313,7 @@ class AgentRunner:
                     subpath=arguments.get("subpath"),
                     model=arguments.get("model"),
                     max_iterations=arguments.get("max_iterations"),
-                    allow_shell=bool(arguments.get("allow_shell", False)),
+                    allow_shell=arguments.get("allow_shell"),
                 )
         except SwarmError as exc:
             return {"success": False, "error": str(exc)}
@@ -316,7 +323,7 @@ class AgentRunner:
         return await self._run_swarm_agent(node, exec_ctx)
 
     async def _run_swarm_agent(self, node: SwarmNode, exec_ctx: ExecutionContext) -> dict[str, Any]:
-        """Ejecuta un nodo del árbol confinado a su carpeta y devuelve su informe.
+        """Ejecuta un nodo del árbol y devuelve su informe.
 
         El nodo es efímero: arranca con contexto limpio y su continuidad es el
         REPORT.md. El carril sí se conserva en exec_ctx.context para la traza.

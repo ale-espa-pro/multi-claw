@@ -1,4 +1,4 @@
-"""Enjambre de agentes efímeros con presupuesto y carpeta confinada.
+"""Enjambre de agentes efímeros con presupuesto y carpeta asignada.
 
 El `agent_id` de un nodo es su ruta relativa dentro del árbol, así que la
 jerarquía de agentes, la de directorios y la de carriles de `context_jsonb` son
@@ -21,13 +21,15 @@ from app_paths import get_allowed_write_roots
 from runner.sandbox import is_within
 
 REPORT_FILENAME = "REPORT.md"
+REPORT_PLACEHOLDER = "<!-- Informe pendiente: sustituye este contenido por tu informe. -->\n"
 # Turno extra que se le concede a un nodo que terminó sin dejar informe.
 REPORT_NUDGE_ITERATIONS = 4
 
 REPORT_NUDGE = (
     f"[SYSTEM] No has escrito {REPORT_FILENAME} en tu carpeta de trabajo y es obligatorio: "
     "el agente que te invocó no puede ver nada de lo que has hecho sin él. "
-    "Escríbelo ahora con write_file, respetando la plantilla de secciones, y responde solo "
+    "Escríbelo ahora con run_command o, si no tienes terminal, completa el archivo inicial "
+    "con edit_file (inspect y edit), respetando la plantilla de secciones. Responde solo "
     "cuando esté guardado."
 )
 
@@ -58,7 +60,7 @@ class SwarmNode:
     extra_prompt: str = ""
     model: str | None = None
     max_iterations: int = 25
-    allow_shell: bool = False
+    allow_shell: bool = True
     status: str = "running"
     spawned: list[str] = field(default_factory=list)
 
@@ -130,8 +132,10 @@ class SwarmRegistry:
         extra_prompt: str = "",
         model: str | None = None,
         max_iterations: int | None = None,
-        allow_shell: bool = False,
+        allow_shell: bool = True,
     ) -> SwarmNode:
+        if not isinstance(allow_shell, bool):
+            raise SwarmError("allow_shell debe ser un booleano")
         max_budget = int(self.config.get("max_budget", 50))
         try:
             budget = int(budget)
@@ -164,6 +168,7 @@ class SwarmRegistry:
             self.roots.append(agent_id)
 
         os.makedirs(real_root, exist_ok=True)
+        _prepare_report(node)
         return node
 
     async def spawn(
@@ -177,8 +182,10 @@ class SwarmRegistry:
         subpath: str | None = None,
         model: str | None = None,
         max_iterations: int | None = None,
-        allow_shell: bool = False,
+        allow_shell: bool | None = None,
     ) -> SwarmNode:
+        if allow_shell is not None and not isinstance(allow_shell, bool):
+            raise SwarmError("allow_shell debe ser un booleano o null para heredar el acceso")
         parent = self.nodes.get(parent_id)
         if parent is None:
             raise SwarmError(
@@ -198,8 +205,10 @@ class SwarmRegistry:
             raise SwarmError(
                 f"profundidad máxima del árbol alcanzada ({max_depth}); resuelve la tarea en este nivel"
             )
+        if allow_shell is None:
+            allow_shell = parent.allow_shell
         if allow_shell and not parent.allow_shell:
-            raise SwarmError("no puedes conceder allow_shell: tu propia rama está confinada")
+            raise SwarmError("no puedes conceder allow_shell: tu propia rama no tiene terminal")
 
         slug = slugify(name)
         child_path = _resolve(os.path.join(parent.root_path, str(subpath or slug)))
@@ -234,6 +243,7 @@ class SwarmRegistry:
             parent.spawned.append(agent_id)
 
         os.makedirs(child_path, exist_ok=True)
+        _prepare_report(node)
         return node
 
     def _resolve_max_iterations(self, requested: int | None) -> int:
@@ -260,8 +270,27 @@ class SwarmRegistry:
 # ── Prompt del worker ──
 
 
+def _prepare_report(node: SwarmNode) -> None:
+    """Deja un archivo editable cuando la rama no dispone de terminal."""
+    if node.allow_shell:
+        return
+    try:
+        with open(node.report_path, "x", encoding="utf-8") as report_file:
+            report_file.write(REPORT_PLACEHOLDER)
+    except FileExistsError:
+        # Al reiterar una carpeta, conserva el informe que dejó el turno previo.
+        pass
+
+
 def _environment_section(node: SwarmNode, max_depth: int) -> str:
-    shell = "sí (tu rama NO está confinada a nivel de shell)" if node.allow_shell else "no disponible"
+    shell = "sí (sin aislamiento de escritura por carpetas)" if node.allow_shell else "no disponible"
+    write_policy = (
+        "Guarda los artefactos en esta carpeta. La terminal puede escribir fuera de ella; "
+        "el control de rutas de edit_file no limita los comandos de shell.\n"
+        if node.allow_shell
+        else "edit_file solo permite modificar archivos dentro de esta carpeta. Puedes inspeccionar "
+        "fuera de ella. Completa el REPORT.md existente mediante inspect y edit.\n"
+    )
     if node.budget:
         budget_line = (
             f"Presupuesto de subagentes: {node.budget}. Crear uno con budget=k te cuesta 1+k; "
@@ -274,8 +303,7 @@ def _environment_section(node: SwarmNode, max_depth: int) -> str:
         "## Tu entorno ##\n"
         f"agent_id: {node.agent_id}\n"
         f"**Carpeta de trabajo: {node.root_path}**\n"
-        "Es la ÚNICA ruta en la que puedes escribir. Puedes leer fuera de ella, pero cualquier "
-        "escritura por encima de tu carpeta será rechazada por el sistema.\n"
+        f"{write_policy}"
         f"Profundidad: {node.depth} de {max_depth}\n"
         f"{budget_line}\n"
         f"run_command: {shell}\n"
@@ -303,9 +331,15 @@ def read_report(node: SwarmNode, max_chars: int) -> dict | None:
     except OSError as exc:
         return {"report_path": path, "report_error": str(exc)}
 
+    if not content.strip() or content.strip() == REPORT_PLACEHOLDER.strip():
+        return None
+
     truncated = len(content) > max_chars
     result = {"report_path": path, "report": content[:max_chars]}
     if truncated:
         result["report_truncated"] = True
-        result["report_hint"] = "Informe recortado; usa read_file sobre report_path para verlo entero."
+        result["report_hint"] = (
+            "Informe recortado; usa run_command o edit_file action=inspect con offset y max_chars "
+            "sobre report_path para leer los fragmentos que necesites."
+        )
     return result

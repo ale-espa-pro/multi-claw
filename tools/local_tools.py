@@ -1,75 +1,40 @@
 total_tools = [
     {
         "type": "function",
-        "name": "write_file",
-        "description": "Crea o escribe texto. Si el archivo ya existe, expected_file_hash es obligatorio y evita sobrescribir cambios ajenos. Devuelve el file_hash final. USAR SIEMPRE para crear archivos en vez de run_python.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Ruta absoluta del archivo a crear/escribir"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Contenido de texto a escribir en el archivo"
-                },
-                "mode": {
-                    "type": "string",
-                    "description": "'w' para sobreescribir (default), 'a' para añadir al final",
-                    "enum": ["w", "a"]
-                },
-                "expected_file_hash": {
-                    "type": "string",
-                    "description": "Hash de la última lectura/escritura. Obligatorio si el archivo ya existe; la escritura se rechaza si cambió."
-                }
-            }
-        },
-        "required": ["path", "content"]
-    },
-    {
-        "type": "function",
         "name": "edit_file",
-        "description": """Modifica un archivo existente reemplazando un fragmento de texto exacto por otro, sin reescribir el archivo entero.
-        Requiere expected_file_hash de la última lectura/escritura y rechaza la edición si el archivo cambió.
-        Devuelve file_hash del estado final.
-        Funciona como search-and-replace: busca 'old_text' en el archivo y lo sustituye por 'new_text'.
-        - old_text debe coincidir EXACTAMENTE con el contenido del archivo (incluyendo espacios, indentación y saltos de línea).
-        - Para eliminar texto, pasar new_text vacío ("").
-        - Para insertar texto, usar old_text como el contexto donde insertar y new_text como old_text + texto nuevo.
-        - replace_all: false (default) reemplaza solo la primera ocurrencia, true reemplaza todas.
-        Rutas permitidas: ~/Downloads, ~/Documents, ~/Desktop, /tmp, ~.""",
+        "description": """Inspecciona y edita archivos de texto UTF-8 existentes con control de versión.
+        Primero usa action='inspect' para obtener contenido y file_hash.value del mismo estado del archivo.
+        Después usa action='edit' con ese expected_file_hash, old_text y new_text. Si falta el hash o el
+        archivo cambió, NO se modifica: vuelve a inspeccionarlo y revisa los cambios antes de reintentar.
+        old_text debe ser no vacío y único salvo replace_all=true. new_text vacío elimina el fragmento.
+        inspect admite offset y max_chars para recorrer archivos grandes; verifica que el hash no cambie
+        entre páginas. Para crear archivos nuevos o ejecutar Python usa run_command.""",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {
+                "path": {"type": "string", "description": "Ruta del archivo existente."},
+                "action": {
                     "type": "string",
-                    "description": "Ruta absoluta del archivo a modificar"
+                    "enum": ["inspect", "edit"],
+                    "description": "inspect obtiene contenido y hash; edit aplica un reemplazo sobre la versión inspeccionada."
                 },
-                "old_text": {
-                    "type": "string",
-                    "description": "Texto exacto a buscar en el archivo (debe ser único si replace_all es false)"
-                },
-                "new_text": {
-                    "type": "string",
-                    "description": "Texto de reemplazo"
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "true para reemplazar todas las ocurrencias, false (default) solo la primera"
-                },
+                "old_text": {"type": "string", "description": "Texto exacto no vacío a sustituir; requerido para edit."},
+                "new_text": {"type": "string", "description": "Reemplazo, puede estar vacío; requerido para edit."},
+                "replace_all": {"type": "boolean", "description": "Sustituye todas las coincidencias; por defecto false."},
                 "expected_file_hash": {
                     "type": "string",
-                    "description": "Hash de la última lectura/escritura. Obligatorio y usado para detectar cambios concurrentes."
-                }
+                    "description": "file_hash.value devuelto por inspect o por la última edición correcta; requerido para edit."
+                },
+                "offset": {"type": "integer", "minimum": 0, "description": "Desplazamiento en caracteres para inspect; por defecto 0."},
+                "max_chars": {"type": "integer", "minimum": 1, "description": "Caracteres de contenido por página de inspect; por defecto 12000."}
             }
         },
-        "required": ["path", "old_text", "new_text", "expected_file_hash"]
+        "required": ["path", "action"]
     },
     {
         "type": "function",
         "name": "run_command",
-        "description": "Ejecuta un comando de terminal con Bash explícito (/bin/bash). Usar para: instalar paquetes (apt, pip), listar procesos, gestión de servicios, operaciones de sistema, git, docker, etc. NO usar para acciones destructivas (rm -rf /, sudo, etc.).",
+        "description": "Ejecuta Bash (/bin/bash) para leer y crear archivos, ejecutar Python y otros scripts, consultar APIs, usar git/docker y administrar el sistema. Para editar archivos existentes con comprobación de versión usa edit_file (inspect y edit). NO usar para acciones destructivas (rm -rf /, sudo, etc.).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -79,7 +44,7 @@ total_tools = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout máximo en segundos (default 10, max 30)"
+                    "description": "Timeout máximo en segundos (default 15, max 30)"
                 },
                 "workdir": {
                     "type": "string",
@@ -88,63 +53,6 @@ total_tools = [
             }
         },
         "required": ["command"]
-    },
-    {
-        "type": "function",
-        "name": "run_python",
-        "description": "Ejecuta código Python en un sandbox RESTRINGIDO. SOLO para cálculos y lógica pura (math, strings, listas). NO tiene acceso a open(), import, ni I/O de archivos. Para escribir archivos usa write_file. Para comandos de sistema usa run_command.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Código Python a ejecutar (solo builtins básicos disponibles: abs, min, max, sum, len, range, sorted, etc.)"
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": "Timeout máximo en segundos (max 10)"
-                }
-            }
-        },
-        "required": ["code"]
-    },
-    {
-        "type": "function",
-        "name": "read_file",
-        "description": "Read and extract content from files: documents (pdf, pptx, docx, xlsx), data (csv, tsv, json) and any text/code/config file (py, js, ts, html, css, sh, toml, yaml, .env, Dockerfile, Makefile, files without extension, etc.). Files whose content looks binary (or known binary extensions like images/archives/executables) return metadata only, without dumping bytes. Textual results include remaining_chars and remaining_tokens for content not shown after max_chars. Always returns file_hash md5 for the file read.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute or relative file path"
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "description": "Maximum characters to return for extracted text. The result includes remaining_chars and remaining_tokens for hidden content."
-                }
-            }
-        },
-        "required": ["path"]
-    },
-    {
-        "type": "function",
-        "name": "file_hash",
-        "description": "Calcula de forma eficiente el hash md5 de un archivo en streaming para comprobar si cambió sin leer su contenido en el contexto.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Ruta absoluta o relativa del archivo"
-                },
-                "compare_to": {
-                    "type": "string",
-                    "description": "Hash previo opcional. Si se proporciona, la respuesta incluye changed=true/false"
-                }
-            }
-        },
-        "required": ["path"]
     },
     {
         "type": "function",
@@ -507,9 +415,10 @@ total_tools = [
         "name": "deploy_swarm",
         "description": """Despliega un enjambre de agentes sobre un árbol de carpetas. Crea la carpeta raíz y lanza
         el agente raíz, que a su vez podrá repartir su presupuesto entre subagentes con spawn_agent.
-        Cada agente del árbol solo puede escribir dentro de su propia subcarpeta y entrega un REPORT.md
-        con lo que hizo, sus limitaciones y los siguientes pasos.
-        El resultado incluye el REPORT.md del agente raíz ya leído, así que no hace falta un read_file extra.
+        Cada agente tiene una carpeta de trabajo y entrega un REPORT.md con lo que hizo,
+        sus limitaciones y los siguientes pasos. La terminal está habilitada por defecto y sus
+        comandos no están confinados a esa carpeta.
+        El resultado incluye el REPORT.md del agente raíz ya leído, así que no hace falta volver a leerlo.
         Usar para trabajos amplios y paralelizables (auditar un repo, investigar varios frentes, generar
         muchos artefactos). Para una tarea única y secuencial es más barato DeviceManagerAgent.""",
         "parameters": {
@@ -545,7 +454,7 @@ total_tools = [
                 },
                 "allow_shell": {
                     "type": "boolean",
-                    "description": "Concede run_command al árbol. Default false. ATENCIÓN: run_command no queda confinado por el sandbox de rutas, así que activarlo deja esa rama sin aislamiento real."
+                    "description": "Terminal habilitada por defecto (true). false retira run_command de esta rama y sus descendientes. Bash no está confinado por el sandbox de rutas."
                 }
             }
         },
@@ -591,7 +500,7 @@ total_tools = [
                 },
                 "allow_shell": {
                     "type": "boolean",
-                    "description": "Concede run_command. Solo posible si tu propia rama ya lo tiene."
+                    "description": "Por defecto hereda el acceso a run_command de su padre. false lo retira; true solo es posible si el padre ya tiene terminal."
                 }
             }
         },

@@ -49,11 +49,10 @@ DEFAULT_SWARM_CONFIG = {
     "report_max_chars": 20_000,
     "parallel_tool_calls": True,
     "tools": [
-        "read_file", "file_hash", "write_file", "edit_file", "run_python",
-        "web_fetch", "interpret_image", "memory_query", "spawn_agent",
+        "edit_file", "web_fetch", "interpret_image", "memory_query", "spawn_agent",
     ],
-    # Solo se conceden a ramas marcadas con allow_shell: run_command no queda
-    # confinado por el sandbox de rutas.
+    # Terminal por defecto. allow_shell=False la retira de una rama y sus hijos;
+    # run_command no queda confinado por el control de rutas de edit_file.
     "shell_tools": ["run_command"],
 }
 
@@ -200,7 +199,7 @@ class AgentBuilder:
             "text": None,
         }
 
-    def get_swarm_tools(self, allow_shell: bool = False) -> list[dict]:
+    def get_swarm_tools(self, allow_shell: bool = True) -> list[dict]:
         cfg = self._swarm_config
         names = list(cfg.get("tools") or [])
         if allow_shell:

@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,8 +16,10 @@ from runner.agent_runner import AgentRunner
 from runner.context import build_context_delta, normalize_full_context
 from runner.execution import ExecutionContext
 from runner.sandbox import write_root_scope
-from runner.swarm import REPORT_FILENAME, SwarmError, SwarmRegistry
-from tools.ticket_dispatcher import action_edit_file, action_run_command, action_write_file
+from runner.swarm import REPORT_FILENAME, REPORT_PLACEHOLDER, SwarmError, SwarmRegistry, read_report
+from tools.file_edit import action_edit_file
+from tools.local_tools import dict_total_tools
+from tools.ticket_dispatcher import action_run_command
 
 SWARM_CONFIG = {
     "max_iterations": 5,
@@ -148,7 +152,7 @@ class SwarmBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_confined_branch_cannot_grant_shell_access(self):
         root = await self._root()
         confined = await self.registry.spawn(
-            parent_id=root.agent_id, name="confinado", task="t", budget=2
+            parent_id=root.agent_id, name="confinado", task="t", budget=2, allow_shell=False
         )
 
         with self.assertRaises(SwarmError) as ctx:
@@ -157,6 +161,55 @@ class SwarmBudgetTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("allow_shell", str(ctx.exception))
+
+    async def test_terminal_is_enabled_by_default_and_inherited(self):
+        root = await self._root()
+        child = await self.registry.spawn(parent_id=root.agent_id, name="hijo", task="t")
+
+        self.assertTrue(root.allow_shell)
+        self.assertTrue(child.allow_shell)
+        self.assertFalse(os.path.exists(root.report_path))
+
+    async def test_disabled_terminal_is_inherited_and_report_can_be_edited(self):
+        root = await self.registry.create_root(
+            root_path=self.root, budget=3, task="t", allow_shell=False
+        )
+        child = await self.registry.spawn(parent_id=root.agent_id, name="hijo", task="t")
+
+        self.assertFalse(child.allow_shell)
+        self.assertEqual(Path(child.report_path).read_text(), REPORT_PLACEHOLDER)
+        self.assertIsNone(read_report(child, 20_000))
+        with write_root_scope(child.root_path):
+            snapshot = action_edit_file({"action": "inspect", "path": child.report_path})
+            result = action_edit_file({
+                "action": "edit", "path": child.report_path,
+                "expected_file_hash": snapshot["file_hash"]["value"],
+                "old_text": snapshot["content"], "new_text": "description: completado",
+            })
+        self.assertTrue(result["success"], result)
+        self.assertEqual(read_report(child, 20_000)["report"], "description: completado")
+
+    async def test_report_scaffold_does_not_overwrite_existing_work(self):
+        report_path = Path(self.root) / REPORT_FILENAME
+        report_path.write_text("description: trabajo previo", encoding="utf-8")
+
+        node = await self.registry.create_root(
+            root_path=self.root, budget=1, task="t", allow_shell=False
+        )
+
+        self.assertEqual(read_report(node, 20_000)["report"], "description: trabajo previo")
+
+    async def test_allow_shell_rejects_non_boolean_values(self):
+        for value in ("false", 1, None):
+            with self.subTest(value=value), self.assertRaises(SwarmError):
+                await self.registry.create_root(
+                    root_path=self.root, budget=3, task="t", allow_shell=value
+                )
+        root = await self._root()
+        with self.assertRaises(SwarmError):
+            await self.registry.spawn(
+                parent_id=root.agent_id, name="hijo", task="t", allow_shell="false"
+            )
 
     async def test_spawn_requires_an_existing_parent_node(self):
         with self.assertRaises(SwarmError) as ctx:
@@ -189,30 +242,40 @@ class SandboxWriteTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_write_inside_the_sandbox_is_allowed(self):
+    @staticmethod
+    def _edit(path, old_text="original", new_text="informe"):
+        snapshot = action_edit_file({"action": "inspect", "path": str(path)})
+        return action_edit_file({
+            "action": "edit", "path": str(path), "old_text": old_text,
+            "new_text": new_text, "expected_file_hash": snapshot["file_hash"]["value"],
+        })
+
+    def test_edit_inside_the_sandbox_is_allowed(self):
         target = self.sandbox / "REPORT.md"
+        target.write_text("original", encoding="utf-8")
 
         with write_root_scope(str(self.sandbox)):
-            result = action_write_file({"path": str(target), "content": "informe"})
+            result = self._edit(target)
 
         self.assertTrue(result["success"], result)
         self.assertEqual(target.read_text(encoding="utf-8"), "informe")
 
-    def test_write_above_the_sandbox_is_rejected_even_inside_allowed_roots(self):
+    def test_edit_above_the_sandbox_is_rejected_even_inside_allowed_roots(self):
         sibling = self.base / "vecino.txt"
+        sibling.write_text("original", encoding="utf-8")
 
         with write_root_scope(str(self.sandbox)):
-            result = action_write_file({"path": str(sibling), "content": "fuga"})
+            result = self._edit(sibling)
 
         self.assertFalse(result["success"])
         self.assertIn("sandbox violation", result["error"])
-        self.assertFalse(sibling.exists())
+        self.assertEqual(sibling.read_text(encoding="utf-8"), "original")
 
     def test_relative_traversal_out_of_the_sandbox_is_rejected(self):
+        target = self.base / "escape.txt"
+        target.write_text("original", encoding="utf-8")
         with write_root_scope(str(self.sandbox)):
-            result = action_write_file(
-                {"path": str(self.sandbox / ".." / "escape.txt"), "content": "fuga"}
-            )
+            result = self._edit(self.sandbox / ".." / "escape.txt")
 
         self.assertFalse(result["success"])
         self.assertIn("sandbox violation", result["error"])
@@ -224,6 +287,7 @@ class SandboxWriteTests(unittest.TestCase):
         with write_root_scope(str(self.sandbox)):
             result = action_edit_file(
                 {
+                    "action": "edit",
                     "path": str(outside),
                     "old_text": "original",
                     "new_text": "pisado",
@@ -252,10 +316,12 @@ class SandboxWriteTests(unittest.TestCase):
         self.assertEqual(result["stdout"].strip(), os.path.realpath(self.sandbox))
 
     def test_without_a_sandbox_the_global_roots_still_apply(self):
-        result = action_write_file({"path": str(self.base / "libre.txt"), "content": "ok"})
+        target = self.base / "libre.txt"
+        target.write_text("original", encoding="utf-8")
+        result = self._edit(target)
         self.assertTrue(result["success"], result)
 
-        denied = action_write_file({"path": "/etc/multi-claw-test", "content": "no"})
+        denied = action_edit_file({"action": "edit", "path": "/etc/multi-claw-test"})
         self.assertFalse(denied["success"])
         self.assertIn("write not allowed outside", denied["error"])
 
@@ -321,8 +387,8 @@ class TraceViewSwarmTests(unittest.TestCase):
                 {
                     "type": "function_call",
                     "call_id": "c1",
-                    "name": "write_file",
-                    "arguments": json.dumps({"path": "/tmp/x"}),
+                    "name": "run_command",
+                    "arguments": json.dumps({"command": "pwd"}),
                 },
                 {
                     "type": "function_call_output",
@@ -351,7 +417,7 @@ class _FakeAgentBuilder:
         return "Test agent"
 
     def get_tools_for_agent(self, agent_name):
-        return []
+        return [dict_total_tools[name] for name in ("deploy_swarm", "run_command", "edit_file")]
 
     def get_runner_config(self):
         return {"max_iterations": 400}
@@ -369,8 +435,11 @@ class _FakeAgentBuilder:
             "text": None,
         }
 
-    def get_swarm_tools(self, allow_shell=False):
-        return []
+    def get_swarm_tools(self, allow_shell=True):
+        names = ["edit_file", "spawn_agent"]
+        if allow_shell:
+            names.append("run_command")
+        return [dict_total_tools[name] for name in names]
 
     def get_agent_max_iterations(self, agent_name):
         return 10
@@ -390,6 +459,22 @@ def _call(call_id, tool, /, **arguments):
         "name": tool,
         "arguments": json.dumps(arguments, ensure_ascii=False),
     }
+
+
+def _write_call(call_id, path, content):
+    """Create a temporary test artifact through the production terminal tool."""
+    return _call(
+        call_id, "run_command",
+        command=f"printf %s {shlex.quote(content)} > {shlex.quote(path)}",
+    )
+
+
+def _edit_call(call_id, path, old_text, new_text):
+    return _call(
+        call_id, "edit_file", action="edit", path=path,
+        old_text=old_text, new_text=new_text,
+        expected_file_hash=hashlib.md5(old_text.encode("utf-8")).hexdigest(),
+    )
 
 
 class _ScriptedRunner(AgentRunner):
@@ -437,20 +522,19 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
                 exec_ctx,
             )
 
-    async def test_tree_runs_confined_and_returns_the_child_report(self):
+    async def test_tree_uses_terminal_by_default_and_returns_the_child_report(self):
         report_body = "---\nstatus: completed\n---\n\ndescription: hecho\n\n## Resultado\nlisto"
         runner = _ScriptedRunner(
             {
                 "enjambre": [
                     [_call("c1", "spawn_agent", name="analisis", task="analiza esto", budget=1)],
-                    [_call("c2", "write_file", path=os.path.join(self.root, REPORT_FILENAME),
-                           content="---\nstatus: completed\n---\n\ndescription: raiz")],
+                    [_write_call("c2", os.path.join(self.root, REPORT_FILENAME),
+                                 "---\nstatus: completed\n---\n\ndescription: raiz")],
                     [_message("enjambre terminado")],
                 ],
                 "enjambre/analisis": [
-                    [_call("h1", "write_file",
-                           path=os.path.join(self.root, "analisis", REPORT_FILENAME),
-                           content=report_body)],
+                    [_write_call("h1", os.path.join(self.root, "analisis", REPORT_FILENAME),
+                                 report_body)],
                     [_message("analisis terminado")],
                 ],
             }
@@ -463,6 +547,8 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["agent_id"], "enjambre")
         self.assertEqual(result["subagents"], ["enjambre/analisis"])
         self.assertIn("description: raiz", result["report"])
+        self.assertTrue(exec_ctx.swarm.get("enjambre").allow_shell)
+        self.assertTrue(exec_ctx.swarm.get("enjambre/analisis").allow_shell)
 
         child_lane = exec_ctx.context["enjambre/analisis"]
         self.assertTrue(child_lane)
@@ -474,8 +560,10 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
             os.path.isfile(os.path.join(self.root, "analisis", REPORT_FILENAME))
         )
 
-    async def test_child_cannot_write_outside_its_own_folder(self):
+    async def test_child_without_terminal_cannot_edit_outside_its_own_folder(self):
         intruder = os.path.join(self.root, "otro-agente", "robado.txt")
+        Path(intruder).parent.mkdir(parents=True)
+        Path(intruder).write_text("original", encoding="utf-8")
         runner = _ScriptedRunner(
             {
                 "enjambre": [
@@ -483,14 +571,14 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
                     [_message("enjambre terminado")],
                 ],
                 "enjambre/ladron": [
-                    [_call("h1", "write_file", path=intruder, content="mío")],
+                    [_edit_call("h1", intruder, "original", "mío")],
                     [_message("no pude")],
                 ],
             }
         )
         exec_ctx = self._exec_ctx()
 
-        await self._deploy(runner, exec_ctx)
+        await self._deploy(runner, exec_ctx, allow_shell=False)
 
         child_output = json.loads(
             next(
@@ -501,7 +589,27 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(child_output["success"])
         self.assertIn("sandbox violation", child_output["error"])
-        self.assertFalse(os.path.exists(intruder))
+        self.assertEqual(Path(intruder).read_text(encoding="utf-8"), "original")
+
+    async def test_branch_without_terminal_cannot_execute_a_shell_tool_call(self):
+        target = os.path.join(self.root, "shell-should-not-run.txt")
+        runner = _ScriptedRunner({
+            "enjambre": [
+                [_write_call("attempt", target, "unexpected")],
+                [_message("terminado")],
+            ],
+        })
+        exec_ctx = self._exec_ctx()
+
+        await self._deploy(runner, exec_ctx, allow_shell=False)
+
+        output = json.loads(next(
+            item["output"] for item in exec_ctx.context["enjambre"]
+            if item["type"] == "function_call_output" and item["call_id"] == "attempt"
+        ))
+        self.assertFalse(output["success"])
+        self.assertIn("allow_shell=false", output["error"])
+        self.assertFalse(os.path.exists(target))
 
     async def test_missing_report_triggers_one_extra_turn_and_is_flagged(self):
         runner = _ScriptedRunner({"enjambre": [[_message("acabé sin informe")]]})
@@ -540,16 +648,21 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         def child_script(own, sibling):
             return [
                 [
-                    _call(f"{own}-1", "write_file",
-                          path=os.path.join(self.root, own, "propio.txt"), content=own),
-                    _call(f"{own}-2", "write_file",
-                          path=os.path.join(self.root, sibling, "intruso.txt"), content=own),
+                    _edit_call(f"{own}-1", os.path.join(self.root, own, "propio.txt"),
+                               "original", own),
+                    _edit_call(f"{own}-2", os.path.join(self.root, sibling, "intruso.txt"),
+                               "original", own),
                 ],
-                [_call(f"{own}-3", "write_file",
-                       path=os.path.join(self.root, own, REPORT_FILENAME),
-                       content=f"description: {own}")],
+                [_edit_call(f"{own}-3", os.path.join(self.root, own, REPORT_FILENAME),
+                            REPORT_PLACEHOLDER, f"description: {own}")],
                 [_message(f"{own} listo")],
             ]
+
+        for name in ("alfa", "beta"):
+            directory = Path(self.root) / name
+            directory.mkdir(parents=True)
+            (directory / "propio.txt").write_text("original", encoding="utf-8")
+            (directory / "intruso.txt").write_text("original", encoding="utf-8")
 
         runner = _ScriptedRunner(
             {
@@ -558,9 +671,8 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
                         _call("s1", "spawn_agent", name="alfa", task="trabaja"),
                         _call("s2", "spawn_agent", name="beta", task="trabaja"),
                     ],
-                    [_call("r1", "write_file",
-                           path=os.path.join(self.root, REPORT_FILENAME),
-                           content="description: raiz")],
+                    [_edit_call("r1", os.path.join(self.root, REPORT_FILENAME),
+                                REPORT_PLACEHOLDER, "description: raiz")],
                     [_message("raiz lista")],
                 ],
                 "enjambre/alfa": child_script("alfa", "beta"),
@@ -570,7 +682,7 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         exec_ctx = self._exec_ctx()
 
-        result = await self._deploy(runner, exec_ctx, budget=5)
+        result = await self._deploy(runner, exec_ctx, budget=5, allow_shell=False)
 
         self.assertEqual(result["status"], "completed")
         for own, sibling in (("alfa", "beta"), ("beta", "alfa")):
@@ -585,8 +697,8 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(own_write["success"], f"{own} no pudo escribir en su carpeta")
             self.assertFalse(intrusion["success"], f"{own} escribió en la carpeta de {sibling}")
             self.assertIn("sandbox violation", intrusion["error"])
-            self.assertFalse(os.path.exists(os.path.join(self.root, sibling, "intruso.txt")))
-            self.assertTrue(os.path.isfile(os.path.join(self.root, own, "propio.txt")))
+            self.assertEqual((Path(self.root) / sibling / "intruso.txt").read_text(), "original")
+            self.assertEqual((Path(self.root) / own / "propio.txt").read_text(), own)
 
     async def test_a_failing_branch_returns_its_budget_to_the_parent(self):
         class _Exploding(_ScriptedRunner):
@@ -599,8 +711,7 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "enjambre": [
                     [_call("c1", "spawn_agent", name="roto", task="t", budget=2)],
-                    [_call("r1", "write_file",
-                           path=os.path.join(self.root, REPORT_FILENAME), content="description: x")],
+                    [_write_call("r1", os.path.join(self.root, REPORT_FILENAME), "description: x")],
                     [_message("listo")],
                 ]
             }
@@ -626,19 +737,20 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
         runner = _ScriptedRunner(
             {
                 "enjambre": [
-                    [_call("r1", "write_file",
-                           path=os.path.join(self.root, REPORT_FILENAME), content="description: x")],
+                    [_edit_call("r1", os.path.join(self.root, REPORT_FILENAME),
+                                REPORT_PLACEHOLDER, "description: x")],
                     [_message("listo")],
                 ]
             }
         )
         exec_ctx = self._exec_ctx()
 
-        await self._deploy(runner, exec_ctx)
+        await self._deploy(runner, exec_ctx, allow_shell=False)
 
         # El agente llamante no queda confinado por la rama que acaba de lanzar.
         outside = os.path.join(self._tmp.name, "fuera-del-enjambre.txt")
-        self.assertTrue(action_write_file({"path": outside, "content": "ok"})["success"])
+        Path(outside).write_text("original", encoding="utf-8")
+        self.assertTrue(SandboxWriteTests._edit(outside)["success"])
 
     async def test_worker_prompt_states_its_folder_and_budget(self):
         runner = _ScriptedRunner({"enjambre": [[_message("ok")]]})

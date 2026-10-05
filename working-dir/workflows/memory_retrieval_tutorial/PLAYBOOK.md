@@ -357,3 +357,70 @@ Si dudas entre dos enfoques, elige el que **reduzca antes el espacio de búsqued
 ## Nota operativa de auditoría de chunks
 
 `conversation_chunks` no debe tratarse como un espejo 1:1 de `context_jsonb`: el pipeline puede serializar solo deltas y ciertos tipos de elementos, agrupar semánticamente y escribir de forma asíncrona. Antes de inferir pérdida de embeddings, comprueba la cobertura por sesión, las sesiones sin chunks y `embedding IS NOT NULL` junto con su dimensión declarada/observada.
+
+## Aprendizaje 20260820T123655Z — fallback tras FTS cero
+
+Si FTS/BM25-like devuelve cero filas al buscar términos compuestos o identificadores, no se interpreta como ausencia de evidencia. Se hace fallback inmediato a búsqueda vectorial/híbrida sobre el mismo subconjunto ya filtrado, se deduplica a una evidencia por session_id y solo se abre context_jsonb para literalidad exacta o verificación estrictamente necesaria. El cero de FTS es una señal de fallback, no un resultado negativo.
+
+## Nota de despliegue: forma real de context_jsonb y fallback de mensajes
+
+En el despliegue actual, `multiagente.conversations.context_jsonb` suele ser un objeto cuyas claves son agentes (`ExecutorAgent`, `DeviceManagerAgent`, `WebSearchAgent`, `PlaywrightSessionAgent`, etc.) y cuyos valores son arrays de eventos. No existe necesariamente `context_jsonb -> 'messages'`; por eso la plantilla 2 puede devolver cero filas aunque haya mensajes.
+
+Detecta primero `jsonb_typeof(context_jsonb -> 'messages')`:
+- si devuelve `array`, usa la ruta canónica de `messages`;
+- si devuelve otro tipo o `NULL`, haz fallback a las claves de agente con `jsonb_each` y recorre sus arrays.
+
+Consulta SELECT canónica para el fallback (preview corta y conservadora):
+
+```sql
+WITH user_events AS (
+  SELECT
+    c.session_id,
+    c.updated_at,
+    agent.agent_key,
+    evt.ord AS event_order,
+    elem ->> 'role' AS role,
+    COALESCE(
+      elem #>> '{content,0,text}',
+      elem ->> 'content',
+      elem ->> 'output',
+      elem::text
+    ) AS payload
+  FROM multiagente.conversations AS c
+  CROSS JOIN LATERAL jsonb_each(
+    CASE
+      WHEN jsonb_typeof(c.context_jsonb) = 'object' THEN c.context_jsonb
+      ELSE '{}'::jsonb
+    END
+  ) AS agent(agent_key, events)
+  CROSS JOIN LATERAL jsonb_array_elements(
+    CASE
+      WHEN jsonb_typeof(agent.events) = 'array' THEN agent.events
+      ELSE '[]'::jsonb
+    END
+  ) WITH ORDINALITY AS evt(elem, ord)
+  WHERE jsonb_typeof(c.context_jsonb -> 'messages') IS DISTINCT FROM 'array'
+    AND elem ->> 'role' = 'user'
+)
+SELECT
+  CASE
+    WHEN length(session_id) > 16 THEN LEFT(session_id, 16) || '...'
+    ELSE session_id
+  END AS session_id_preview,
+  updated_at,
+  agent_key,
+  event_order,
+  role,
+  length(payload) AS payload_chars,
+  CASE
+    WHEN payload IS NULL THEN NULL
+    WHEN payload ~* '(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|secret|authorization|cookie|bearer|session[_ -]?id|message[_ -]?id|thread[_ -]?id|user[_ -]?id)'
+      THEN '[REDACTED]'
+    ELSE LEFT(payload, 240)
+  END AS payload_preview
+FROM user_events
+ORDER BY updated_at DESC, session_id, agent_key, event_order
+LIMIT 50;
+```
+
+La extracción literal/cronológica debe abrir `context_jsonb` solo para las sesiones candidatas; `conversation_chunks` sigue siendo el router inicial. En previews, trunca los IDs y no muestres valores de secretos (si la sanitización no es fiable, omite el payload).

@@ -6,27 +6,21 @@ import asyncio
 import base64
 import contextlib
 import hashlib
-import io
 import json
 import mimetypes
-import multiprocessing
 import os
-import queue
-import resource
-import signal
 import subprocess
-import tempfile
 import time
-import traceback
 import uuid
 from typing import Any
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from app_paths import get_allowed_write_roots, get_playwright_output_dir, get_user_preferences_path
+from app_paths import get_playwright_output_dir, get_user_preferences_path
 from runner.images import IMAGE_EXT_TO_MIME, MAX_IMAGE_BYTES
 from runner.sandbox import get_write_root, is_within
+from tools.file_edit import action_edit_file
 from tools.memoryTools.RAG_memory import MemoryRag
 from tools.memoryTools.semantic_splitter import count_tokens
 
@@ -65,29 +59,6 @@ def _get_openai_client() -> AsyncOpenAI:
 
 # ── Constantes ───────────────────────────────────────────────────────
 
-TEXT_EXTENSIONS = {
-    ".txt", ".md", ".markdown", ".rst", ".py", ".pyi", ".json", ".jsonl", ".csv", ".tsv",
-    ".log", ".yaml", ".yml", ".sql", ".toml", ".ini", ".cfg", ".conf", ".env", ".properties",
-    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html", ".htm",
-    ".css", ".scss", ".sass", ".less", ".xml", ".svg", ".graphql", ".gql", ".proto",
-    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
-    ".c", ".h", ".cpp", ".cxx", ".cc", ".hpp", ".hxx", ".cs", ".java", ".kt", ".kts",
-    ".go", ".rs", ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".swift", ".scala", ".dart",
-    ".ex", ".exs", ".erl", ".clj", ".hs", ".ml", ".tf", ".hcl", ".make", ".mk", ".cmake",
-    ".gitignore", ".dockerignore", ".editorconfig",
-}
-# Extensiones que siempre tratamos como binarias: ni siquiera olfateamos el
-# contenido para evitar volcar ficheros grandes en el contexto.
-BINARY_EXTENSIONS = {
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tif", ".tiff", ".heic",
-    ".mp3", ".mp4", ".m4a", ".avi", ".mov", ".mkv", ".webm", ".wav", ".flac", ".ogg",
-    ".zip", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".tar", ".jar", ".war",
-    ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".class", ".wasm",
-    ".pyc", ".pyo", ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    ".sqlite", ".sqlite3", ".db", ".parquet", ".npy", ".npz", ".pkl", ".pickle",
-}
-# Muestra de bytes para decidir texto vs binario en extensiones desconocidas.
-TEXT_SNIFF_BYTES = 8192
 DEFAULT_MAX_CHARS = 200_000
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 12_000
 DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT = 40
@@ -96,54 +67,21 @@ MAX_PLAYWRIGHT_SESSION_TIMEOUT = 2_700
 FILE_HASH_ALGORITHM = "md5"
 HASH_CHUNK_BYTES = 1024 * 1024
 
-ALLOWED_WRITE_ROOTS = get_allowed_write_roots()
-
 BLOCKED_COMMANDS = {
     "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){", "fork",
     "chmod -R 777 /", "chown -R", "shutdown", "reboot", "halt",
     "poweroff", "init 0", "init 6", "killall", "kill -9 1",
     "> /dev/sda", "mv / ", "wget | sh", "curl | sh", "curl | bash",
-    "wget | bash", "python -c", "python3 -c",
+    "wget | bash",
 }
 
 BLOCKED_PREFIXES = {"sudo", "su", "doas"}
-
-SAFE_BUILTINS = {
-    "abs": abs, "min": min, "max": max, "sum": sum,
-    "len": len, "range": range, "print": print,
-    "int": int, "float": float, "str": str, "bool": bool,
-    "list": list, "dict": dict, "tuple": tuple, "set": set,
-    "sorted": sorted, "reversed": reversed, "enumerate": enumerate,
-    "zip": zip, "map": map, "filter": filter,
-    "isinstance": isinstance, "type": type,
-    "round": round, "pow": pow, "divmod": divmod,
-    "True": True, "False": False, "None": None,
-}
-
 
 # ── Utilidad de rutas ────────────────────────────────────────────────
 
 def _resolve_path(path: str) -> str:
     """Expande ~ y variables de entorno, luego resuelve a ruta absoluta."""
     return os.path.realpath(os.path.expandvars(os.path.expanduser(path)))
-
-
-def _write_denial(real_path: str) -> str | None:
-    """Motivo por el que una ruta no es escribible, o None si sí lo es.
-
-    Un agente confinado debe cumplir las dos condiciones: estar dentro de su
-    sandbox y dentro de los roots permitidos del despliegue.
-    """
-    write_root = get_write_root()
-    if write_root is not None and not is_within(real_path, write_root):
-        return f"sandbox violation: este agente solo puede escribir dentro de {write_root}"
-    if not any(is_within(real_path, root) for root in ALLOWED_WRITE_ROOTS):
-        return f"write not allowed outside: {ALLOWED_WRITE_ROOTS}"
-    return None
-
-
-def _is_under_allowed_root(real_path: str) -> bool:
-    return _write_denial(real_path) is None
 
 
 def _file_hash(path: str) -> dict:
@@ -163,219 +101,7 @@ def _file_hash(path: str) -> dict:
     }
 
 
-def _file_conflict(path: str, expected_hash: str | None) -> dict | None:
-    """Return an actionable error when a file is not at the expected version."""
-    current_hash = _file_hash(path)["value"]
-    if expected_hash == current_hash:
-        return None
-    return {
-        "success": False,
-        "error": "file_conflict",
-        "message": "The file changed since the agent last read or wrote it.",
-        "path": path,
-        "expected_file_hash": expected_hash,
-        "current_file_hash": current_hash,
-        "action_required": "Read the file again, review the changes, then retry with its new hash.",
-    }
-
-
-def _atomic_write_text(path: str, content: str, encoding: str) -> None:
-    """Replace a text file atomically, leaving the old version intact on failure."""
-    directory = os.path.dirname(path)
-    fd, temporary_path = tempfile.mkstemp(prefix=".agent-write-", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding=encoding) as temporary_file:
-            temporary_file.write(content)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        os.replace(temporary_path, path)
-    except Exception:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary_path)
-        raise
-
-
-# ── Herramientas: Archivos ──────────────────────────────────────────
-
-def action_read_file(body: dict) -> dict:
-    """Lee un archivo. Requiere: path. Opcional: max_chars."""
-    path = body.get("path")
-    if not path:
-        return {"success": False, "error": "missing required field: path"}
-
-    path = _resolve_path(path)
-    if not os.path.exists(path):
-        return {"success": False, "error": f"file not found: {path}"}
-
-    max_chars = max(int(body.get("max_chars") or DEFAULT_MAX_CHARS), 1)
-    ext = os.path.splitext(path)[1].lower()
-    mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-
-    try:
-        reader = _FILE_READERS.get(ext)
-        if reader:
-            result = reader(path, mime, max_chars)
-        elif ext in BINARY_EXTENSIONS or _looks_binary(path):
-            result = _read_binary(path, mime)
-        else:
-            # Extensión desconocida pero contenido textual (código, config,
-            # ficheros sin extensión como Dockerfile/Makefile): leer como texto.
-            result = _read_text(path, mime, max_chars)
-        if result.get("success"):
-            result["file_hash"] = _file_hash(path)
-        return result
-    except Exception as e:
-        return {"success": False, "path": path, "mime": mime, "error": str(e)}
-
-
-def action_file_hash(body: dict) -> dict:
-    """Devuelve una huella eficiente del archivo. Requiere: path."""
-    path = body.get("path")
-    if not path:
-        return {"success": False, "error": "missing required field: path"}
-
-    real_path = _resolve_path(path)
-    if not os.path.isfile(real_path):
-        return {"success": False, "error": f"file not found: {real_path}", "path": real_path}
-
-    compare_to = (body.get("compare_to") or "").strip() or None
-
-    try:
-        file_hash = _file_hash(real_path)
-    except Exception as e:
-        return {"success": False, "path": real_path, "error": str(e)}
-
-    result = {
-        "success": True,
-        "path": real_path,
-        "file_hash": file_hash,
-    }
-    if compare_to is not None:
-        result["changed"] = file_hash["value"] != compare_to
-    return result
-
-
-def action_write_file(body: dict) -> dict:
-    """
-    Escribe contenido a un archivo de texto.
-    Requiere: path (str), content (str).
-    Opcional: mode ('w'|'a'), encoding (default 'utf-8'), expected_file_hash.
-    """
-    path = body.get("path")
-    content = body.get("content")
-    if not path:
-        return {"success": False, "error": "missing required field: path"}
-    if content is None:
-        return {"success": False, "error": "missing required field: content"}
-
-    mode = body.get("mode", "w")
-    if mode not in ("w", "a"):
-        return {"success": False, "error": "mode must be 'w' or 'a'"}
-    encoding = body.get("encoding", "utf-8")
-    expected_hash = (body.get("expected_file_hash") or "").strip() or None
-    submitted_bytes = len(content.encode(encoding))
-
-    # ✅ FIX: expandir ~ y $HOME antes de validar
-    real_path = _resolve_path(path)
-
-    denial = _write_denial(real_path)
-    if denial:
-        return {"success": False, "error": denial, "path": real_path}
-
-    try:
-        os.makedirs(os.path.dirname(real_path), exist_ok=True)
-        if os.path.exists(real_path):
-            conflict = _file_conflict(real_path, expected_hash)
-            if conflict:
-                return conflict
-            if mode == "a":
-                with open(real_path, "r", encoding=encoding, errors="replace") as existing_file:
-                    content = existing_file.read() + content
-            _atomic_write_text(real_path, content, encoding)
-        else:
-            # Exclusive creation avoids silently replacing a file created concurrently.
-            with open(real_path, "x", encoding=encoding) as new_file:
-                new_file.write(content)
-        return {
-            "success": True,
-            "path": real_path,
-            "bytes_written": submitted_bytes,
-            "file_hash": _file_hash(real_path),
-        }
-    except Exception as e:
-        return {"success": False, "path": real_path, "error": str(e)}
-
-
-def action_edit_file(body: dict) -> dict:
-    """
-    Modifica un archivo reemplazando old_text por new_text (search-and-replace).
-    Requiere: path, old_text, new_text, expected_file_hash.
-    Opcional: replace_all (bool, default False).
-    """
-    path = body.get("path")
-    old_text = body.get("old_text")
-    new_text = body.get("new_text")
-    expected_hash = (body.get("expected_file_hash") or "").strip() or None
-
-    if not path:
-        return {"success": False, "error": "missing required field: path"}
-    if old_text is None:
-        return {"success": False, "error": "missing required field: old_text"}
-    if new_text is None:
-        return {"success": False, "error": "missing required field: new_text"}
-
-    real_path = _resolve_path(path)
-
-    denial = _write_denial(real_path)
-    if denial:
-        return {"success": False, "error": denial, "path": real_path}
-
-    if not os.path.isfile(real_path):
-        return {"success": False, "error": f"file not found: {real_path}"}
-
-    replace_all = bool(body.get("replace_all", False))
-
-    try:
-        conflict = _file_conflict(real_path, expected_hash)
-        if conflict:
-            return conflict
-
-        with open(real_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-
-        count = content.count(old_text)
-
-        if count == 0:
-            return {
-                "success": False,
-                "error": "old_text not found in file",
-                "path": real_path,
-            }
-
-        if not replace_all and count > 1:
-            return {
-                "success": False,
-                "error": f"old_text found {count} times — set replace_all=true or provide more context to make it unique",
-                "path": real_path,
-                "occurrences": count,
-            }
-
-        new_content = content.replace(old_text, new_text) if replace_all else content.replace(old_text, new_text, 1)
-
-        _atomic_write_text(real_path, new_content, "utf-8")
-
-        replacements = count if replace_all else 1
-        return {
-            "success": True,
-            "path": real_path,
-            "replacements": replacements,
-            "file_hash": _file_hash(real_path),
-        }
-    except Exception as e:
-        return {"success": False, "path": real_path, "error": str(e)}
-
-
-# ── Lectores por tipo ────────────────────────────────────────────────
+# ── Límites de salida ──────────────────────────────────────────────
 
 def _clip_text_content(content: str, max_chars: int) -> tuple[str, bool, int]:
     shown = content[:max_chars]
@@ -387,139 +113,6 @@ def _count_remaining_tokens(content: str, max_chars: int) -> int:
     if len(content) <= max_chars:
         return 0
     return count_tokens(content[max_chars:])
-
-
-def _read_text(path: str, mime: str, max_chars: int) -> dict:
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-    clipped, truncated, remaining_chars = _clip_text_content(content, max_chars)
-    return {
-        "success": True, "path": path, "mime": mime, "kind": "text",
-        "truncated": truncated, "remaining_chars": remaining_chars,
-        "remaining_tokens": _count_remaining_tokens(content, max_chars),
-        "content": clipped,
-    }
-
-
-def _read_pdf(path: str, mime: str, max_chars: int) -> dict:
-    from PyPDF2 import PdfReader
-    reader = PdfReader(path)
-    content = []
-    for page in reader.pages:
-        txt = page.extract_text() or ""
-        if not txt:
-            continue
-        content.append(txt)
-    full_content = "\n".join(content)
-    clipped, truncated, remaining_chars = _clip_text_content(full_content, max_chars)
-    return {
-        "success": True, "path": path, "mime": mime, "kind": "pdf_text",
-        "pages": len(reader.pages), "truncated": truncated,
-        "remaining_chars": remaining_chars,
-        "remaining_tokens": _count_remaining_tokens(full_content, max_chars),
-        "content": clipped,
-    }
-
-
-def _read_docx(path: str, mime: str, max_chars: int) -> dict:
-    from docx import Document
-    doc = Document(path)
-    parts = []
-    for p in doc.paragraphs:
-        t = (p.text or "").strip()
-        if not t:
-            continue
-        parts.append(t + "\n")
-    full_content = "".join(parts)
-    clipped, truncated, remaining_chars = _clip_text_content(full_content, max_chars)
-    return {
-        "success": True, "path": path, "mime": mime, "kind": "docx_text",
-        "truncated": truncated, "remaining_chars": remaining_chars,
-        "remaining_tokens": _count_remaining_tokens(full_content, max_chars),
-        "content": clipped,
-    }
-
-
-def _read_xlsx(path: str, mime: str, max_chars: int) -> dict:
-    import openpyxl
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    sheets, total = {}, 0
-    omitted_parts = []
-    for ws in wb.worksheets:
-        rows = []
-        for row in ws.iter_rows(values_only=True):
-            line = "\t".join("" if v is None else str(v) for v in row).rstrip()
-            if not line:
-                continue
-            if total < max_chars:
-                remaining_budget = max_chars - total
-                rows.append(line[:remaining_budget])
-                omitted = line[remaining_budget:]
-                if omitted:
-                    omitted_parts.append(omitted)
-            else:
-                omitted_parts.append(line)
-            total += len(line) + 1
-        if rows:
-            sheets[ws.title] = rows
-    return {
-        "success": True, "path": path, "mime": mime, "kind": "xlsx_text",
-        "sheets": list(sheets.keys()), "truncated": total > max_chars,
-        "remaining_chars": max(total - max_chars, 0),
-        "remaining_tokens": count_tokens("\n".join(omitted_parts)) if omitted_parts else 0,
-        "content": sheets,
-    }
-
-
-def _read_pptx(path: str, mime: str, max_chars: int) -> dict:
-    from pptx import Presentation
-    prs = Presentation(path)
-    texts = []
-    for si, slide in enumerate(prs.slides, 1):
-        for shape in slide.shapes:
-            t = getattr(shape, "text", "").strip()
-            if not t:
-                continue
-            block = f"[slide {si}] {t}\n"
-            texts.append(block)
-    full_content = "".join(texts)
-    clipped, truncated, remaining_chars = _clip_text_content(full_content, max_chars)
-    return {
-        "success": True, "path": path, "mime": mime, "kind": "pptx_text",
-        "slides": len(prs.slides), "truncated": truncated,
-        "remaining_chars": remaining_chars,
-        "remaining_tokens": _count_remaining_tokens(full_content, max_chars),
-        "content": clipped,
-    }
-
-
-def _read_binary(path: str, mime: str) -> dict:
-    size = os.path.getsize(path)
-    return {
-        "success": True, "path": path, "mime": mime, "kind": "binary",
-        "bytes": size,
-        "preview_omitted": True,
-        "omission_reason": "binary preview disabled to avoid large base64 payloads in tool outputs",
-    }
-
-
-def _looks_binary(path: str) -> bool:
-    """Heurística tipo git: un byte NUL en la primera muestra ⇒ binario."""
-    try:
-        with open(path, "rb") as f:
-            sample = f.read(TEXT_SNIFF_BYTES)
-    except OSError:
-        return True
-    return b"\x00" in sample
-
-
-_FILE_READERS = {
-    **{ext: _read_text for ext in TEXT_EXTENSIONS},
-    ".pdf": _read_pdf,
-    ".docx": _read_docx,
-    ".xlsx": _read_xlsx,
-    ".pptx": _read_pptx,
-}
 
 
 # ── Herramienta: Ejecutar comandos de terminal ──────────────────────
@@ -548,10 +141,8 @@ async def action_run_command(body: dict) -> dict:
 
     timeout = min(int(body.get("timeout", 15)), 30)
 
-    # ✅ FIX: expandir ~ y $HOME en workdir
-    # Un agente confinado arranca en su sandbox y no puede salir de él con workdir.
-    # El comando en sí no queda confinado: run_command solo se concede a ramas
-    # marcadas explícitamente como no confinadas (allow_shell en spawn_agent).
+    # El swarm arranca en su carpeta; workdir debe permanecer dentro de ella.
+    # Bash puede acceder a otras rutas: esta comprobación no aísla el comando.
     write_root = get_write_root()
     workdir = _resolve_path(body.get("workdir") or write_root or "~")
     if write_root is not None and not is_within(workdir, write_root):
@@ -566,7 +157,8 @@ async def action_run_command(body: dict) -> dict:
         return {"success": False, "error": blocked, "command": command}
 
     try:
-        result = subprocess.run(
+        result = await asyncio.to_thread(
+            subprocess.run,
             command,
             shell=True,
             executable="/bin/bash",
@@ -592,93 +184,6 @@ async def action_run_command(body: dict) -> dict:
         return {"success": False, "error": "timeout exceeded", "command": command, "timeout": timeout}
     except Exception as e:
         return {"success": False, "error": str(e), "command": command}
-
-
-# ── Herramienta: Sandbox Python ─────────────────────────────────────
-
-def _apply_sandbox_limits(memory_mb=512, cpu_seconds=10, max_files=64):
-    mem = memory_mb * 1024 * 1024
-    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
-    resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (max_files, max_files))
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    os.umask(0o077)
-    try:
-        import ctypes
-        ctypes.CDLL("libc.so.6").prctl(1, signal.SIGKILL)
-    except Exception:
-        pass
-
-
-def _run_sandboxed(code: str, result_queue: multiprocessing.Queue):
-    try:
-        _apply_sandbox_limits()
-        safe_globals = {"__builtins__": SAFE_BUILTINS}
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            exec(code, safe_globals)
-
-        result = safe_globals.get("RESULT", buf.getvalue().strip() or None)
-        if result is not None:
-            try:
-                json.dumps(result)
-            except TypeError:
-                result = repr(result)
-
-        result_queue.put((True, buf.getvalue(), result, None))
-    except Exception as e:
-        result_queue.put((False, "", None, traceback.format_exc()))
-
-
-def action_run_python(body: dict) -> dict:
-    """Ejecuta código Python en sandbox. Requiere: code. Opcional: timeout (max 10s)."""
-    code = body.get("code", "")
-    timeout = min(int(body.get("timeout", 5)), 10)
-
-    q = multiprocessing.Queue()
-    p = multiprocessing.Process(target=_run_sandboxed, args=(code, q))
-
-    start = time.perf_counter()
-    p.start()
-
-    # Drenamos la cola ANTES de join: multiprocessing.Queue vuelca el objeto
-    # en un hilo alimentador y el hijo no termina hasta que el pipe se lee, así
-    # que un join previo se colgaría (timeout falso) con salidas > ~64KB.
-    result_tuple = None
-    timed_out = False
-    deadline = start + timeout
-    while True:
-        try:
-            result_tuple = q.get(timeout=0.05)
-            break
-        except queue.Empty:
-            if not p.is_alive():
-                # El proceso terminó; intento final por si dejó el resultado.
-                with contextlib.suppress(queue.Empty):
-                    result_tuple = q.get_nowait()
-                break
-            if time.perf_counter() >= deadline:
-                timed_out = True
-                break
-    elapsed = time.perf_counter() - start
-
-    if timed_out:
-        if p.is_alive():
-            p.kill()
-        p.join()
-        return {"success": False, "error": "timeout exceeded", "execution_time": elapsed}
-
-    p.join()
-    if result_tuple is None:
-        return {"success": False, "error": "no result returned", "execution_time": elapsed}
-    success, stdout, result, tb = result_tuple
-
-    resp = {"success": success, "stdout": stdout, "execution_time": elapsed}
-    if success:
-        resp["result"] = result
-    else:
-        resp["error"] = tb
-    return resp
 
 
 async def action_web_fetch(body: dict) -> dict:
@@ -1547,12 +1052,8 @@ def action_save_preference(body: dict):
 # ── Dispatcher ───────────────────────────────────────────────────────
 
 ticket_dispatcher: dict[str, callable] = {
-    "read_file": action_read_file,
-    "file_hash": action_file_hash,
-    "write_file": action_write_file,
     "edit_file": action_edit_file,
     "run_command": action_run_command,
-    "run_python": action_run_python,
     "web_fetch": action_web_fetch,
     "playwright_session": action_playwright_session,
     "playwright_navigate": action_playwright_navigate,

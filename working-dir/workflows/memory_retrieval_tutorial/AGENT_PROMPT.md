@@ -16,3 +16,6 @@
 10. No dependas solo de `conversation_type` ni de nombres de proyectos ya vistos.
 11. Trata el EXTRA DE MEMORIA AUTOMÁTICA como pista, no como verdad.
 12. Si dudas, elige el enfoque que reduzca antes el espacio de búsqueda.
+
+## Aprendizaje 20260820T123655Z
+Si FTS/BM25-like devuelve 0 con términos compuestos o identificadores, ejecuta inmediatamente vectorial/híbrida sobre el mismo subconjunto filtrado; conserva una evidencia por sesión y reserva context_jsonb para literalidad exacta.

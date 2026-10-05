@@ -409,3 +409,63 @@ SELECT session_id, n_chunks, n_writeish, n_readish, n_summaryish,
 FROM sig
 ORDER BY n_writeish DESC, n_summaryish DESC, n_chunks DESC
 LIMIT 30;
+
+-- Aprendizaje 20260820T123655Z: FTS=0 no significa ausencia de evidencia.
+-- Reutilizar el subconjunto filtrado y ejecutar la plantilla vectorial/híbrida de la sección 6;
+-- deduplicar por session_id antes de ampliar el límite y abrir context_jsonb solo para literalidad exacta.
+
+-- =====================================================
+-- 2B) Mensajes cuando context_jsonb está indexado por agente
+-- =====================================================
+-- Usar cuando jsonb_typeof(context_jsonb -> 'messages') no sea 'array'.
+-- Recorre las claves de agente cuyos valores son arrays de eventos.
+-- La salida usa IDs truncados y una preview conservadora; no devuelve
+-- payloads completos ni valores que parezcan secretos o IDs sensibles.
+WITH user_events AS (
+  SELECT
+    c.session_id,
+    c.updated_at,
+    agent.agent_key,
+    evt.ord AS event_order,
+    elem ->> 'role' AS role,
+    COALESCE(
+      elem #>> '{content,0,text}',
+      elem ->> 'content',
+      elem ->> 'output',
+      elem::text
+    ) AS payload
+  FROM multiagente.conversations AS c
+  CROSS JOIN LATERAL jsonb_each(
+    CASE
+      WHEN jsonb_typeof(c.context_jsonb) = 'object' THEN c.context_jsonb
+      ELSE '{}'::jsonb
+    END
+  ) AS agent(agent_key, events)
+  CROSS JOIN LATERAL jsonb_array_elements(
+    CASE
+      WHEN jsonb_typeof(agent.events) = 'array' THEN agent.events
+      ELSE '[]'::jsonb
+    END
+  ) WITH ORDINALITY AS evt(elem, ord)
+  WHERE jsonb_typeof(c.context_jsonb -> 'messages') IS DISTINCT FROM 'array'
+    AND elem ->> 'role' = 'user'
+)
+SELECT
+  CASE
+    WHEN length(session_id) > 16 THEN LEFT(session_id, 16) || '...'
+    ELSE session_id
+  END AS session_id_preview,
+  updated_at,
+  agent_key,
+  event_order,
+  role,
+  length(payload) AS payload_chars,
+  CASE
+    WHEN payload IS NULL THEN NULL
+    WHEN payload ~* '(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|secret|authorization|cookie|bearer|session[_ -]?id|message[_ -]?id|thread[_ -]?id|user[_ -]?id)'
+      THEN '[REDACTED]'
+    ELSE LEFT(payload, 240)
+  END AS payload_preview
+FROM user_events
+ORDER BY updated_at DESC, session_id, agent_key, event_order
+LIMIT 50;

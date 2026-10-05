@@ -180,18 +180,30 @@ El workflow `working-dir/workflows/memory_retrieval_tutorial` documenta el playb
 
 ```text
 deploy_swarm(root_path=..., budget=12, task=...)
-└── auditoria                    escribe solo en auditoria/
-    ├── seguridad                escribe solo en auditoria/seguridad/
-    │   └── dependencias         escribe solo en auditoria/seguridad/dependencias/
-    └── rendimiento              escribe solo en auditoria/rendimiento/
+└── auditoria                    carpeta asignada: auditoria/
+    ├── seguridad                carpeta asignada: auditoria/seguridad/
+    │   └── dependencias         carpeta asignada: auditoria/seguridad/dependencias/
+    └── rendimiento              carpeta asignada: auditoria/rendimiento/
 ```
 
-- **Confinamiento.** Cada nodo solo puede escribir dentro de su carpeta; leer fuera sí está permitido. El límite viaja en un `ContextVar` que fija el runner, no en los argumentos de la tool, así que el modelo no puede falsificarlo. `run_command` no se concede por defecto porque ningún sandbox de rutas lo contiene; `allow_shell` lo habilita y marca esa rama como no confinada.
+- **Terminal por defecto.** Cada nodo recibe `run_command` y los hijos heredan ese acceso. La carpeta asignada organiza sus artefactos; no es un sandbox del sistema operativo. `allow_shell=false` retira la terminal de una rama y sus descendientes no pueden recuperarla. `edit_file` sí limita las modificaciones a la carpeta del nodo mediante un `ContextVar` fijado por el runner; inspeccionar archivos externos está permitido.
 - **Presupuesto.** `budget` es el número total de agentes (1-50), raíz incluida. Crear un hijo con `budget=k` cuesta `1+k` al padre y lo que el hijo no gasta se le devuelve al terminar. El tope lo lleva el servidor, no el prompt.
-- **REPORT.md.** Cada agente termina escribiendo un informe con resultado, artefactos, ejecuciones, limitaciones y siguientes pasos. El padre lo recibe ya leído en el resultado de la llamada. Si falta, el agente recibe un turno extra solo para escribirlo y, si sigue faltando, el resultado se marca como `report_missing`.
+- **REPORT.md.** Cada agente termina escribiendo un informe con resultado, artefactos, ejecuciones, limitaciones y siguientes pasos. El padre lo recibe ya leído en el resultado de la llamada. Las ramas sin terminal reciben un archivo inicial para completarlo con `edit_file`; no pueden crear archivos nuevos. Si falta el informe o queda vacío o sin completar, el agente recibe un turno extra para escribirlo y, si sigue faltando, el resultado se marca como `report_missing`.
 - **Efímeros pero trazables.** Un nodo vive una sola invocación y su continuidad es el REPORT.md, pero su carril de contexto se persiste entero en `context_jsonb`: todo el árbol queda disponible para `memory_query` y para `/conversations/{id}/trace`.
 
 Se configura en el bloque `_swarm` de `agents/agent_config.json`: modelo, toolset, `max_depth`, `max_concurrent`, `max_budget` y `max_iterations`.
+
+## Terminal Y Edición De Archivos
+
+`run_command` es la herramienta general para leer y crear archivos, buscar y ejecutar scripts, incluido Python. Está disponible para ExecutorAgent, DeviceManagerAgent, PlaywrightSessionAgent y, por defecto, los agentes del enjambre. Las herramientas `run_python`, `read_file`, `write_file` y `file_hash` se han retirado.
+
+`edit_file` reúne la inspección de una versión y su edición protegida:
+
+1. Llama con `action="inspect"` y `path`. Devuelve el contenido y `file_hash.value` (MD5 de la misma versión leída); `offset` y `max_chars` permiten leer por fragmentos.
+2. Llama con `action="edit"`, `path`, `old_text` no vacío, `new_text` y `expected_file_hash` igual al hash inspeccionado. Usa `replace_all=true` solo para sustituir todas las apariciones.
+3. Si el archivo cambió, la edición devuelve `file_conflict` sin escribir. Repite `inspect`, revisa los cambios y prepara la edición sobre esa versión.
+
+`inspect` calcula el hash sobre los mismos bytes que devuelve como contenido; evita leer y calcular el hash en operaciones separadas. Los comandos de shell no aplican este control de versiones; usa `edit_file` al modificar archivos existentes para aprovecharlo.
 
 ## Tests
 

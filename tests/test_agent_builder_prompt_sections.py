@@ -55,7 +55,7 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
                             "max_iterations": 2,
                         },
                         "ExecutorAgent": {
-                            "tools": ["read_file"],
+                            "tools": ["run_command", "edit_file"],
                             "main": True,
                             "json_response": False,
                             "model": "executor-model",
@@ -94,6 +94,24 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
         self.assertEqual(web_params["model"], "default-model")
         self.assertTrue(web_params["parallel_tool_calls"])
         self.assertEqual(web_params["text"], {"format": {"type": "json_object"}})
+
+    def test_default_toolsets_use_terminal_and_guarded_edits(self):
+        builder = AgentBuilder()
+        builder.load_agents()
+        removed = {"run_python", "read_file", "write_file", "file_hash"}
+
+        for agent_name in ("ExecutorAgent", "DeviceManagerAgent", "PlaywrightSessionAgent"):
+            with self.subTest(agent=agent_name):
+                names = {tool["name"] for tool in builder.get_tools_for_agent(agent_name)}
+                self.assertTrue({"run_command", "edit_file"} <= names)
+                self.assertFalse(removed & names)
+
+        defaults = {tool["name"] for tool in builder.get_swarm_tools()}
+        without_shell = {tool["name"] for tool in builder.get_swarm_tools(allow_shell=False)}
+        self.assertIn("run_command", defaults)
+        self.assertNotIn("run_command", without_shell)
+        self.assertEqual(defaults - without_shell, {"run_command"})
+        self.assertFalse(removed & defaults)
 
 
 if __name__ == "__main__":
