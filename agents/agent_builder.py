@@ -11,6 +11,7 @@ from app_paths import (
     get_working_path,
 )
 from agents.agent_prompts import base_prompts
+from data.conversation_store import TEMPORAL_CONVERSATION
 from tools.local_tools import dict_total_tools
 from tools.ticket_dispatcher import ticket_dispatcher
 
@@ -301,8 +302,12 @@ class AgentBuilder:
             )
         return "\n".join(lines)
 
+    def _base_path(self, getter) -> str:
+        """Un working_base explícito manda; si no, cada ruta admite su variable de entorno."""
+        return getter(self.working_base) if self._working_base_override else getter()
+
     def _workflows_section(self) -> str:
-        path = get_workflows_path(self.working_base) if self._working_base_override else get_workflows_path()
+        path = self._base_path(get_workflows_path)
         if not path or not os.path.isdir(path):
             return ""
         workflow_names = self._list_task_directories(path)
@@ -311,7 +316,7 @@ class AgentBuilder:
         return f"Workflows creados:\n{workflow_names}\n"
 
     def _crons_section(self) -> str:
-        path = get_crons_path(self.working_base) if self._working_base_override else get_crons_path()
+        path = self._base_path(get_crons_path)
         if not path or not os.path.isdir(path):
             return ""
         cron_list = self._list_task_directories(path)
@@ -337,19 +342,15 @@ class AgentBuilder:
 
     def _working_dir_section(self, session_id: str, conversation_type: str | None) -> str:
         """Resolve working directory, create it if needed, return prompt section."""
-        if conversation_type == "temporal":
+        if conversation_type == TEMPORAL_CONVERSATION:
             return "Esta conversación es temporal. No se almacenará memoria ni archivos."
 
-        if conversation_type == "cron":
-            base_dir = get_crons_path(self.working_base) if self._working_base_override else get_crons_path()
-        else:
-            base_dir = get_sessions_path(self.working_base)
+        sessions_path = self._base_path(get_sessions_path)
+        crons_path = self._base_path(get_crons_path)
+        workflows_path = self._base_path(get_workflows_path)
 
-        working_dir = os.path.join(base_dir, session_id)
+        working_dir = os.path.join(crons_path if conversation_type == "cron" else sessions_path, session_id)
         os.makedirs(working_dir, exist_ok=True)
-        sessions_path = get_sessions_path(self.working_base)
-        crons_path = get_crons_path(self.working_base) if self._working_base_override else get_crons_path()
-        workflows_path = get_workflows_path(self.working_base) if self._working_base_override else get_workflows_path()
 
         return (
             "## Entorno de ejecución ##\n"

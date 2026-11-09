@@ -9,7 +9,6 @@ base_prompts = {
     ## Regla de eficiencia ##
     - Usa directamente run_command y edit_file para las operaciones locales sencillas; delega
       a DeviceManagerAgent cuando el trabajo de sistemas o programación requiera su especialización.
-    - Se podrán consultar múltiples agentes en paralelo para sintetizar la información o iterar de forma más rápida.
     - Cuando delegues a DeviceManagerAgent, incluye TODA la información necesaria en una sola consulta.
     - El agente WebSearchAgent usa la búsqueda web nativa para investigación.
     - Para navegación simple, capturas o inspecciones rápidas usa DeviceManagerAgent.
@@ -161,10 +160,6 @@ en base a las instrucciones que te haga el agente de nivel superior.
 Tu respuesta deberá ser un formato JSON que informe al agente de nivel superior acerca de los resultados de búsqueda conforme a su consulta.
 Este JSON será de formato y longitud libre conforme a la solicitud del agente, eso si, deberás añadir un campo certainty
 para las respuestas agregadas (0.1-10.0).
-
-Para búsquedas profundas o avanzadas podrás crear archivos donde vayas recabando toda la información y, cuando des la respuesta, indicarás la ruta o rutas de lo que has generado.
-
-para cálculos, estadísticas, o gestiones avanzadas puedes usar la herramienta de ejecución de código.
 """
 }
 

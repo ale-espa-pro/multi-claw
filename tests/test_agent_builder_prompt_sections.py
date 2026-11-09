@@ -95,6 +95,12 @@ class AgentBuilderPromptSectionTests(unittest.TestCase):
         self.assertTrue(web_params["parallel_tool_calls"])
         self.assertEqual(web_params["text"], {"format": {"type": "json_object"}})
 
+    def test_sessions_path_env_applies_without_explicit_base(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"SESSIONS_PATH": folder}):
+            section = AgentBuilder()._working_dir_section("sesion", None)
+
+        self.assertIn(os.path.join(os.path.realpath(folder), "sesion"), section)
+
     def test_default_toolsets_use_terminal_and_guarded_edits(self):
         builder = AgentBuilder()
         builder.load_agents()

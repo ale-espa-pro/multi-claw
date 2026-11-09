@@ -4,10 +4,11 @@ import copy
 import inspect
 import json
 import os
+import time
 from typing import Any, Optional
 
 from agents.agent_builder import AgentBuilder
-from data.conversation_store import PostgresConversationStore
+from data.conversation_store import TEMPORAL_CONVERSATION, PostgresConversationStore
 from data.redis_manager import RedisSessionManager
 from providers import AnthropicMessagesProvider, OpenAIResponsesProvider, resolve_provider_name
 from runner import context as context_utils
@@ -20,6 +21,8 @@ from runner.swarm import SwarmError, SwarmNode
 from tools.memoryTools.RAG_memory import MemoryRag
 
 SWARM_TOOLS = {"deploy_swarm", "spawn_agent"}
+# Peticiones seguidas sin texto ni tools antes de dar la respuesta por perdida.
+MAX_EMPTY_RESPONSES = 2
 
 
 class AgentRunner:
@@ -43,6 +46,7 @@ class AgentRunner:
 
         runner_config = agent_builder.get_runner_config()
         self.max_iterations = int(runner_config["max_iterations"])
+        self._checkpoint_seconds = float(os.getenv("CONTEXT_CHECKPOINT_SECONDS", "30"))
 
         self.session_manager = RedisSessionManager(redis_url=redis_url)
         self.conversation_store = conversation_store
@@ -61,9 +65,13 @@ class AgentRunner:
 
     # ── Contexto persistido ──
 
+    def _normalize_loaded_context(self, context: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        normalized = context_utils.normalize_full_context(context, self.agent_names)
+        return {lane: context_utils.close_interrupted_calls(items) for lane, items in normalized.items()}
+
     async def _load_complete_context(self, session_id: str) -> dict[str, list[dict[str, Any]]]:
         cached_context, context_exists = await self.session_manager.load_context(session_id, self.agent_names)
-        normalized_cached = context_utils.normalize_full_context(cached_context, self.agent_names)
+        normalized_cached = self._normalize_loaded_context(cached_context)
         if context_exists:
             return normalized_cached
 
@@ -71,7 +79,7 @@ class AgentRunner:
             return normalized_cached
 
         stored_context = await self.conversation_store.load_context(session_id)
-        normalized_stored = context_utils.normalize_full_context(stored_context, self.agent_names)
+        normalized_stored = self._normalize_loaded_context(stored_context)
 
         if any(normalized_stored.values()):
             await self.session_manager.save_context(session_id, normalized_stored)
@@ -85,13 +93,42 @@ class AgentRunner:
         conversation_type: str | None = None,
     ):
         normalized_context = context_utils.normalize_full_context(context, self.agent_names)
-        if self.conversation_store is not None:
+        # Una conversación temporal solo vive en la caché con TTL.
+        if self.conversation_store is not None and conversation_type != TEMPORAL_CONVERSATION:
             await self.conversation_store.save_context(
                 session_id=session_id,
                 context=normalized_context,
                 conversation_type=conversation_type,
             )
         await self.session_manager.save_context(session_id, normalized_context)
+
+    async def _checkpoint(self, exec_ctx: ExecutionContext):
+        """Guarda el progreso de una ejecución larga; un reinicio no debe perder la traza."""
+        now = time.monotonic()
+        if now - exec_ctx.last_checkpoint < self._checkpoint_seconds:
+            return
+        exec_ctx.last_checkpoint = now
+        try:
+            await self._persist_complete_context(
+                session_id=exec_ctx.session_id,
+                context=exec_ctx.context,
+                conversation_type=exec_ctx.conversation_type,
+            )
+        except Exception as exc:
+            print(f"\033[1;31m  [CHECKPOINT] {exec_ctx.session_id}: {exc}\033[0m")
+
+    async def _save_token_usage(self, exec_ctx: ExecutionContext):
+        usage = exec_ctx.token_tracker.get_usage()
+        if (
+            self.conversation_store is None
+            or exec_ctx.conversation_type == TEMPORAL_CONVERSATION
+            or not usage["requests"]
+        ):
+            return
+        try:
+            await self.conversation_store.add_token_usage(exec_ctx.session_id, usage)
+        except Exception as exc:
+            print(f"\033[1;31m  [USAGE] {exec_ctx.session_id}: {exc}\033[0m")
 
     # ── Entrada principal ──
 
@@ -110,11 +147,13 @@ class AgentRunner:
             exec_ctx = ExecutionContext(
                 session_id, self.agent_names, conversation_type, swarm_config=self._swarm_config
             )
-            try:
-                exec_ctx.context = await self._load_complete_context(session_id)
-                exec_ctx.adopt_lanes(exec_ctx.context)
-                previous_context = copy.deepcopy(exec_ctx.context)
+            # Fuera del try: si la carga falla no hay nada que guardar, y persistir
+            # sobrescribiría la conversación con el contexto aún vacío.
+            exec_ctx.context = await self._load_complete_context(session_id)
+            exec_ctx.adopt_lanes(exec_ctx.context)
+            previous_context = copy.deepcopy(exec_ctx.context)
 
+            try:
                 response = await self._chat(user_input, resolved_agent, exec_ctx, images=images)
 
                 await self._persist_complete_context(
@@ -122,26 +161,33 @@ class AgentRunner:
                     context=exec_ctx.context,
                     conversation_type=conversation_type,
                 )
-                self._memory_service.schedule_semantic_sync(
-                    session_id=session_id,
-                    context=exec_ctx.context,
-                    previous_context=previous_context,
-                    conversation_type=conversation_type,
-                )
+                if conversation_type != TEMPORAL_CONVERSATION:
+                    self._memory_service.schedule_semantic_sync(
+                        session_id=session_id,
+                        context=exec_ctx.context,
+                        previous_context=previous_context,
+                        conversation_type=conversation_type,
+                    )
                 exec_ctx.token_tracker.print_summary()
                 return response
-            except Exception:
-                try:
+            except (Exception, asyncio.CancelledError):
+                # CancelledError llega en apagados y reinicios con trabajo ya hecho.
+                with contextlib.suppress(Exception):
                     await self._persist_complete_context(
                         session_id=session_id,
                         context=exec_ctx.context,
                         conversation_type=conversation_type,
                     )
-                except Exception:
-                    pass
                 raise
+            finally:
+                await self._save_token_usage(exec_ctx)
 
     # ── Loop de agente ──
+
+    def _tools_for(self, agent_name: str, node: SwarmNode | None) -> list[dict[str, Any]]:
+        if node is not None:
+            return self.agent_builder.get_swarm_tools(node.allow_shell)
+        return self.agent_builder.get_tools_for_agent(agent_name)
 
     async def _request_agent(
         self, agent_name: str, curr_context: list, exec_ctx: ExecutionContext
@@ -168,10 +214,9 @@ class AgentRunner:
 
         if node is not None:
             params = self.agent_builder.get_swarm_params(node.model)
-            tools = self.agent_builder.get_swarm_tools(node.allow_shell)
         else:
             params = self.agent_builder.get_agent_params(agent_name)
-            tools = self.agent_builder.get_tools_for_agent(agent_name)
+        tools = self._tools_for(agent_name, node)
         provider = self._providers[resolve_provider_name(params)]
 
         async with contextlib.AsyncExitStack() as stack:
@@ -195,12 +240,10 @@ class AgentRunner:
         tool_name = tool_call["name"]
         call_id = tool_call["call_id"]
 
-        node = exec_ctx.swarm.get(caller_agent)
-        if tool_name == "run_command" and node is not None and not node.allow_shell:
-            return call_id, {
-                "success": False,
-                "error": "run_command is disabled for this swarm branch (allow_shell=false)",
-            }
+        # El nombre lo redacta el modelo: solo se ejecuta lo que se le ofreció a este agente.
+        offered = {tool.get("name") for tool in self._tools_for(caller_agent, exec_ctx.swarm.get(caller_agent))}
+        if tool_name not in offered:
+            return call_id, {"success": False, "error": f"tool '{tool_name}' is not available to {caller_agent}"}
 
         try:
             tool_arguments = json.loads(tool_call["arguments"])
@@ -272,7 +315,7 @@ class AgentRunner:
         raw_user_text = context_utils.serialize_user_payload(task_description)
         exec_ctx.context[agent_name].append(image_utils.build_user_message_item(raw_user_text))
 
-        working_context = copy.deepcopy(exec_ctx.context[agent_name])
+        working_context = context_utils.compact_previous_turns(exec_ctx.context[agent_name])
         working_context[-1] = image_utils.build_user_message_item(
             await self._memory_service.augment_user_message(raw_user_text, exec_ctx.session_id)
         )
@@ -406,7 +449,7 @@ class AgentRunner:
         user_message = image_utils.build_user_message_item(user_input, images=images)
         exec_ctx.context[agent_name].append(user_message)
 
-        working_context = copy.deepcopy(exec_ctx.context[agent_name])
+        working_context = context_utils.compact_previous_turns(exec_ctx.context[agent_name])
         working_context[-1] = image_utils.with_replaced_message_text(
             working_context[-1],
             await self._memory_service.augment_user_message(user_input, exec_ctx.session_id),
@@ -422,6 +465,7 @@ class AgentRunner:
         max_iterations: int,
         subagent: bool = False,
     ):
+        empty_responses = 0
         for _ in range(max_iterations):
             items = await self._request_agent(agent_name, working_context, exec_ctx)
             function_calls, final_message = self._collect_response_items(items, agent_name, working_context, exec_ctx)
@@ -432,7 +476,15 @@ class AgentRunner:
                 return final_message
 
             if function_calls:
+                empty_responses = 0
                 await self._append_tool_results(function_calls, agent_name, working_context, exec_ctx)
+                await self._checkpoint(exec_ctx)
+                continue
+
+            # Sin progreso la siguiente petición sería idéntica y se pagaría igual.
+            empty_responses += 1
+            if empty_responses >= MAX_EMPTY_RESPONSES:
+                return f"[{agent_name}] El modelo no devolvió texto ni llamadas a herramientas"
 
         return f"[{agent_name}] Máximo de iteraciones alcanzado"
 
@@ -449,15 +501,17 @@ class AgentRunner:
         final_message: Optional[str] = None
 
         for task in items:
-            working_context.append(task)
-            exec_ctx.context[agent_name].append(task)
-
             if task["type"] == "function_call":
                 function_calls.append(task)
             elif task["type"] == "message":
                 extracted_text = context_utils.extract_message_text(task)
                 if extracted_text:
                     final_message = extracted_text
+
+        # Una respuesta vacía no aporta nada: razonamiento sin continuación no se conserva.
+        if function_calls or final_message:
+            working_context.extend(items)
+            exec_ctx.context[agent_name].extend(items)
 
         return function_calls, final_message
 

@@ -44,7 +44,7 @@ total_tools = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout máximo en segundos (default 15, max 30)"
+                    "description": "Timeout máximo en segundos (default 15, max 120). Al expirar se devuelve la salida parcial."
                 },
                 "workdir": {
                     "type": "string",

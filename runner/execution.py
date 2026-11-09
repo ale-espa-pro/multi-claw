@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from pricing.token_tracker import TokenUsageTracker
 from runner.swarm import SwarmRegistry
@@ -18,6 +19,7 @@ class ExecutionContext:
         self.conversation_type = conversation_type
         self.context: dict[str, list] = {name: [] for name in agent_names}
         self.token_tracker = TokenUsageTracker()
+        self.last_checkpoint = time.monotonic()
         # System prompts construidos una vez por request (evita I/O de disco
         # en cada iteración del loop del agente).
         self.system_prompts: dict[str, str] = {}

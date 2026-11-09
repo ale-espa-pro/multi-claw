@@ -7,6 +7,23 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+TEMPORAL_CONVERSATION = "temporal"
+_TOKEN_USAGE_COUNTERS = ("input_tokens", "output_tokens", "cached_tokens", "requests")
+
+# Deja cada carril solo con los mensajes visibles. Vistas y listados no usan las
+# llamadas a tools, que son ~90 % del volumen, y así no salen de Postgres.
+_VISIBLE_CONTEXT_SQL = """
+    (
+        SELECT COALESCE(jsonb_object_agg(lane.key, (
+            SELECT COALESCE(jsonb_agg(entry.item ORDER BY entry.position), '[]'::jsonb)
+            FROM jsonb_array_elements(lane.value) WITH ORDINALITY AS entry(item, position)
+            WHERE entry.item->>'type' = 'message' AND entry.item->>'role' IN ('user', 'assistant')
+        )), '{}'::jsonb)
+        FROM jsonb_each(context_jsonb) AS lane
+        WHERE jsonb_typeof(lane.value) = 'array'
+    )
+"""
+
 
 class PostgresConversationStore:
     """Persistencia mínima del snapshot completo de una conversación."""
@@ -28,6 +45,7 @@ class PostgresConversationStore:
         self.schema = re.sub(r"[^a-zA-Z0-9_]", "", raw_schema) or "multiagente"
         self.main_agent = os.getenv("MULTIAGENT_MAIN_AGENT", "ExecutorAgent")
         self.pool_timeout = float(os.getenv("MULTIAGENT_PG_POOL_TIMEOUT", "20"))
+        self.query_timeout_ms = int(float(os.getenv("MEMORY_QUERY_TIMEOUT_SECONDS", "30")) * 1000)
         self.pool: AsyncConnectionPool | None = None
         self.vector_enabled = False
 
@@ -112,14 +130,6 @@ class PostgresConversationStore:
                 continue
             normalized[agent_name] = [item for item in items if isinstance(item, dict)]
         return normalized
-
-    def _flatten_context_items(self, context_jsonb: Any) -> list[dict[str, Any]]:
-        normalized_context = self._normalize_context(context_jsonb)
-        flattened: list[dict[str, Any]] = []
-        for agent_name, items in normalized_context.items():
-            for item in items:
-                flattened.append({"agent_name": agent_name, **item})
-        return flattened
 
     def _select_primary_conversation_items(self, context_jsonb: Any) -> list[dict[str, Any]]:
         normalized_context = self._normalize_context(context_jsonb)
@@ -454,26 +464,31 @@ class PostgresConversationStore:
                     ),
                 )
 
-    async def list_conversations(self, limit: int = 50) -> list[dict[str, Any]]:
+    async def _fetch_conversations(
+        self,
+        clause: str,
+        params: tuple[Any, ...],
+        visible_only: bool,
+    ) -> list[dict[str, Any]]:
         pool = self._require_pool()
+        context_column = _VISIBLE_CONTEXT_SQL if visible_only else "context_jsonb"
         async with pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(
-                    """
+                    f"""
                     SELECT
                         session_id,
-                        context_jsonb,
+                        {context_column} AS context_jsonb,
                         username,
                         metadata,
                         conversation_type,
                         created_at,
                         updated_at,
                         archived_at
-                    FROM {conversations_table}
-                    ORDER BY updated_at DESC
-                    LIMIT %s
-                    """.format(conversations_table=self.conversations_table),
-                    (limit,),
+                    FROM {self.conversations_table}
+                    {clause}
+                    """,
+                    params,
                 )
                 rows = await cur.fetchall()
 
@@ -491,41 +506,40 @@ class PostgresConversationStore:
             for row in rows
         ]
 
-    async def get_conversation(self, session_id: str) -> dict[str, Any] | None:
-        pool = self._require_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    """
-                    SELECT
-                        session_id,
-                        context_jsonb,
-                        username,
-                        metadata,
-                        conversation_type,
-                        created_at,
-                        updated_at,
-                        archived_at
-                    FROM {conversations_table}
-                    WHERE session_id = %s
-                    """.format(conversations_table=self.conversations_table),
-                    (session_id,),
-                )
-                row = await cur.fetchone()
-
-        if row is None:
-            return None
-
-        return self._build_snapshot_view(
-            session_id=row["session_id"],
-            context_jsonb=row["context_jsonb"],
-            username=row.get("username"),
-            metadata=row.get("metadata"),
-            conversation_type=row.get("conversation_type"),
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            archived_at=row.get("archived_at"),
+    async def list_conversations(self, limit: int = 50) -> list[dict[str, Any]]:
+        return await self._fetch_conversations(
+            "ORDER BY updated_at DESC LIMIT %s", (limit,), visible_only=True
         )
+
+    async def get_conversation(
+        self, session_id: str, visible_only: bool = False
+    ) -> dict[str, Any] | None:
+        """Una conversación; visible_only omite tools y razonamiento, solo útiles en la traza."""
+        rows = await self._fetch_conversations(
+            "WHERE session_id = %s", (session_id,), visible_only=visible_only
+        )
+        return rows[0] if rows else None
+
+    async def add_token_usage(self, session_id: str, usage: dict[str, Any]):
+        """Acumula en metadata.token_usage el consumo de un turno."""
+        pool = self._require_pool()
+        counters = {name: int(usage.get(name, 0)) for name in _TOKEN_USAGE_COUNTERS}
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"""
+                    UPDATE {self.conversations_table}
+                    SET metadata = jsonb_set(metadata, '{{token_usage}}', (
+                        SELECT jsonb_object_agg(
+                            key,
+                            COALESCE((metadata #>> ARRAY['token_usage', key])::bigint, 0) + value::bigint
+                        )
+                        FROM jsonb_each_text(%s)
+                    ))
+                    WHERE session_id = %s
+                    """,
+                    (Jsonb(counters), session_id),
+                )
 
     async def delete_conversation(self, session_id: str):
         pool = self._require_pool()
@@ -543,6 +557,8 @@ class PostgresConversationStore:
             async with conn.transaction():
                 async with conn.cursor(row_factory=dict_row) as cur:
                     await cur.execute("SET TRANSACTION READ ONLY")
+                    # Comparte pool con los guardados: una consulta lenta no puede retenerlo.
+                    await cur.execute(f"SET LOCAL statement_timeout = {self.query_timeout_ms}")
                     await cur.execute(sql)
                     return await cur.fetchall()
 

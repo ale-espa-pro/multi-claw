@@ -66,6 +66,9 @@ class OpenAIResponsesProvider:
             "model": params["model"],
             "reasoning": params["reasoning"],
             "parallel_tool_calls": params["parallel_tool_calls"],
+            # Válvula de seguridad: un carril mayor que la ventana del modelo
+            # fallaría con un 400 en cada mensaje posterior de la sesión.
+            "truncation": "auto",
         }
         if params.get("text"):
             kwargs["text"] = params["text"]

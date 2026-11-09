@@ -2,6 +2,8 @@
 .agents
 .codex
 .env
+exports
+memory
 .venv
 venv
 __pycache__

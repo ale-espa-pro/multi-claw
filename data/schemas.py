@@ -1,5 +1,5 @@
 from typing import Any
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatImage(BaseModel):
@@ -13,12 +13,20 @@ class ChatImage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    session_id: str
+    session_id: str = Field(min_length=1, max_length=200)
     message: str
     images: list[ChatImage] | None = None
     username: str | None = None
     metadata: dict[str, Any] | None = None
     conversation_type: str | None = None  # (None, cron, temporal)
+
+    @field_validator("session_id")
+    @classmethod
+    def session_id_is_one_path_segment(cls, value: str) -> str:
+        # Da nombre a la carpeta de trabajo de la sesión.
+        if value in {".", ".."} or any(char in value for char in "/\\\0"):
+            raise ValueError("session_id cannot contain path separators")
+        return value
 
 
 class ChatResponse(BaseModel):

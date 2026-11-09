@@ -324,7 +324,8 @@ class MemoryRag:
 
         try:
             rows = await self.conversation_store.execute_readonly_query(sql)
-            out = _truncate_output(rows)
+            # Serializar y tokenizar resultados grandes bloquearía el event loop.
+            out = await asyncio.to_thread(_truncate_output, rows)
             return {
                 "success": True,
                 "row_count": len(rows),

@@ -2,8 +2,9 @@
 import asyncio
 import logging
 import os
+import secrets
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
@@ -11,7 +12,7 @@ from openai import DefaultAioHttpClient
 from dotenv import load_dotenv
 
 from agents.agent_builder import AgentBuilder
-from data.conversation_store import PostgresConversationStore
+from data.conversation_store import TEMPORAL_CONVERSATION, PostgresConversationStore
 from data.schemas import (
     ChatRequest, ChatResponse,
     ConversationSummary, ConversationDetail, ConversationTrace,
@@ -28,11 +29,13 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 app = FastAPI()
-# Nota: allow_credentials=True es incompatible con allow_origins=["*"];
-# la API se autentica con el header x-api-key, no con cookies.
+# La API da acceso a una terminal: sin CORS_ORIGINS solo se admite la propia
+# máquina, para que una web cualquiera no pueda invocarla desde el navegador.
+cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
+    allow_origin_regex=None if cors_origins else r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,9 +62,16 @@ runner = AgentRunner(
 CHAT_API_KEY = os.getenv("CHAT_API_KEY")
 
 
-def _require_api_key(x_api_key: str | None):
-    if CHAT_API_KEY and x_api_key != CHAT_API_KEY:
+if not CHAT_API_KEY:
+    logger.warning("CHAT_API_KEY no está definida: la API (y su terminal) queda sin autenticación")
+
+
+def require_api_key(x_api_key: str | None = Header(default=None)):
+    if CHAT_API_KEY and not secrets.compare_digest((x_api_key or "").encode(), CHAT_API_KEY.encode()):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+api = APIRouter(dependencies=[Depends(require_api_key)])
 
 # ── Twilio ──
 set_agent_runner(runner)
@@ -96,6 +106,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    await ticket_dispatcher_module.close_all_playwright_sessions()
     await runner.close()
 
 
@@ -110,54 +121,56 @@ async def serve_inspector():
     return FileResponse("inspector.html")
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, x_api_key: str | None = Header(default=None)):
-    _require_api_key(x_api_key)
-    await conversation_store.ensure_conversation(
-        session_id=request.session_id,
-        username=request.username,
-        metadata=request.metadata,
-        conversation_type=request.conversation_type,
-    )
+@api.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest):
+    temporal = request.conversation_type == TEMPORAL_CONVERSATION
+    if not temporal:
+        await conversation_store.ensure_conversation(
+            session_id=request.session_id,
+            username=request.username,
+            metadata=request.metadata,
+            conversation_type=request.conversation_type,
+        )
     response = await runner.process_message(
         session_id=request.session_id,
         user_input=request.message,
         images=[image.model_dump(exclude_none=True) for image in request.images or []],
         conversation_type=request.conversation_type,
     )
-    conversation = await conversation_store.get_conversation(request.session_id)
+    conversation = (
+        None if temporal else await conversation_store.get_conversation(request.session_id, visible_only=True)
+    )
     title = conversation["title"] if conversation is not None else None
     return ChatResponse(response=response, session_id=request.session_id, title=title)
 
 
-@app.get("/conversations", response_model=list[ConversationSummary])
-async def list_conversations(limit: int = 50, x_api_key: str | None = Header(default=None)):
-    _require_api_key(x_api_key)
+@api.get("/conversations", response_model=list[ConversationSummary])
+async def list_conversations(limit: int = Query(default=50, ge=1, le=500)):
     conversations = await conversation_store.list_conversations(limit=limit)
     return [serialize_conversation_summary(row) for row in conversations]
 
 
-@app.get("/conversations/{session_id}", response_model=ConversationDetail)
-async def get_conversation(session_id: str, x_api_key: str | None = Header(default=None)):
-    _require_api_key(x_api_key)
-    conversation = await conversation_store.get_conversation(session_id)
+@api.get("/conversations/{session_id}", response_model=ConversationDetail)
+async def get_conversation(session_id: str):
+    conversation = await conversation_store.get_conversation(session_id, visible_only=True)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return serialize_conversation_detail(conversation)
 
 
-@app.delete("/conversations/{session_id}")
-async def delete_conversation(session_id: str, x_api_key: str | None = Header(default=None)):
-    _require_api_key(x_api_key)
+@api.delete("/conversations/{session_id}")
+async def delete_conversation(session_id: str):
     await runner.delete_session(session_id)
     return {"status": "deleted"}
 
 
-@app.get("/conversations/{session_id}/trace", response_model=ConversationTrace)
-async def get_conversation_trace(session_id: str, x_api_key: str | None = Header(default=None)):
-    _require_api_key(x_api_key)
+@api.get("/conversations/{session_id}/trace", response_model=ConversationTrace)
+async def get_conversation_trace(session_id: str):
     conversation = await conversation_store.get_conversation(session_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     trace = build_agent_trace(conversation["context_jsonb"])
     return {"session_id": session_id, **trace}
+
+
+app.include_router(api)

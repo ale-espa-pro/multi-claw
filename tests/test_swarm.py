@@ -55,6 +55,17 @@ class SwarmBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(node.depth, 0)
         self.assertEqual(node.root_path, os.path.realpath(self.root))
 
+    async def test_max_budget_caps_every_swarm_of_the_request(self):
+        first = await self.registry.create_root(root_path=self.root, budget=40, task="t", name="a")
+
+        with self.assertRaises(SwarmError):
+            await self.registry.create_root(root_path=self.root, budget=20, task="t", name="b")
+
+        # Lo que el primer enjambre no gastó vuelve a estar disponible.
+        await self.registry.settle(first, "completed")
+        second = await self.registry.create_root(root_path=self.root, budget=20, task="t", name="c")
+        self.assertEqual(second.budget, 19)
+
     async def test_budget_outside_range_is_rejected(self):
         for budget in (0, -3, 51):
             with self.subTest(budget=budget), self.assertRaises(SwarmError):
@@ -608,7 +619,7 @@ class SwarmRunnerTests(unittest.IsolatedAsyncioTestCase):
             if item["type"] == "function_call_output" and item["call_id"] == "attempt"
         ))
         self.assertFalse(output["success"])
-        self.assertIn("allow_shell=false", output["error"])
+        self.assertIn("not available", output["error"])
         self.assertFalse(os.path.exists(target))
 
     async def test_missing_report_triggers_one_extra_turn_and_is_flagged(self):

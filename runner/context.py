@@ -41,6 +41,11 @@ def normalize_message_content(content: Any, role: str) -> list[dict[str, Any]]:
             if isinstance(text, str):
                 mapped_type = "input_text" if role == "user" else "output_text"
                 normalized_parts.append({"type": mapped_type, "text": text})
+        elif part_type == "refusal":
+            # Sin esto un rechazo del modelo parecería una respuesta vacía.
+            refusal = part.get("refusal")
+            if isinstance(refusal, str):
+                normalized_parts.append({"type": "output_text", "text": refusal})
         elif part_type == "input_image":
             normalized_image = normalize_image_part(part)
             if normalized_image is not None:
@@ -169,15 +174,90 @@ def build_context_delta(
     return delta
 
 
+INTERRUPTED_TOOL_OUTPUT = json.dumps(
+    {"success": False, "error": "interrupted: la ejecución terminó antes de recibir este resultado"},
+    ensure_ascii=False,
+)
+
+
+def close_interrupted_calls(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Da un resultado a las llamadas que se quedaron sin salida.
+
+    Un reinicio a mitad de turno las deja huérfanas y los proveedores rechazan
+    para siempre un historial así.
+    """
+    answered = {item["call_id"] for item in items if item.get("type") == "function_call_output"}
+    closed: list[dict[str, Any]] = []
+    for item in items:
+        closed.append(item)
+        if item.get("type") == "function_call" and item["call_id"] not in answered:
+            closed.append({
+                "type": "function_call_output",
+                "call_id": item["call_id"],
+                "output": INTERRUPTED_TOOL_OUTPUT,
+            })
+    return closed
+
+
+DEFAULT_COMPACT_OVER_CHARS = 2_000
+COMPACT_KEEP_CHARS = 300
+# Turnos anteriores que se envían íntegros para que "sigue con eso" funcione.
+COMPACT_KEEP_TURNS = 1
+
+
+def _compact_text(text: str) -> str:
+    return (
+        f"{text[:COMPACT_KEEP_CHARS]}… [recortado de un total de {len(text)} caracteres; "
+        "el original sigue en conversations.context_jsonb, accesible con memory_query]"
+    )
+
+
+def _compact_item(item: dict[str, Any], limit: int) -> dict[str, Any]:
+    item_type = item.get("type")
+    if item_type == "function_call_output" and len(item.get("output", "")) > limit:
+        return {**item, "output": _compact_text(item["output"])}
+    if item_type == "function_call" and len(item.get("arguments", "")) > limit:
+        # Los argumentos deben seguir siendo un objeto JSON para los proveedores.
+        return {
+            **item,
+            "arguments": json.dumps({"_compactado": _compact_text(item["arguments"])}, ensure_ascii=False),
+        }
+    return item
+
+
+def compact_previous_turns(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copia del carril para el modelo con la E/S pesada de turnos antiguos resumida.
+
+    Solo cambia lo que se envía: el carril persistido sigue completo. Se aplica
+    al empezar el turno para que el prefijo no varíe dentro del bucle y la caché
+    del proveedor siga acertando.
+    """
+    limit = _env_int("CONTEXT_COMPACT_OVER_CHARS", DEFAULT_COMPACT_OVER_CHARS)
+    user_turns = [
+        index for index, item in enumerate(items)
+        if item.get("type") == "message" and item.get("role") == "user"
+    ]
+    # El último mensaje de usuario es el turno en curso, que nunca se toca.
+    keep = COMPACT_KEEP_TURNS + 1
+    if limit <= 0 or len(user_turns) <= keep:
+        return list(items)
+    boundary = user_turns[-keep]
+    return [_compact_item(item, limit) for item in items[:boundary]] + items[boundary:]
+
+
 DEFAULT_TOOL_OUTPUT_MAX_CHARS = 100_000
-DEFAULT_TOOL_OUTPUT_HARD_MAX_CHARS = 5_000_000
+DEFAULT_TOOL_OUTPUT_HARD_MAX_CHARS = 1_000_000
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _positive_env_int(name: str, default: int) -> int:
-    try:
-        return max(int(os.getenv(name, default)), 1)
-    except (TypeError, ValueError):
-        return default
+    return max(_env_int(name, default), 1)
 
 
 def serialize_tool_result(result: Any, requested_chars: int | None = None) -> str:
@@ -197,17 +277,24 @@ def serialize_tool_result(result: Any, requested_chars: int | None = None) -> st
     if len(serialized) <= effective_limit:
         return serialized
 
-    preview = serialized[:effective_limit]
+    # Inicio y final: el resultado suele abrir la salida y el error, cerrarla.
+    omitted = len(serialized) - effective_limit
+    tail_start = len(serialized) - effective_limit // 3
+    head_end = effective_limit - effective_limit // 3
+    preview = f"{serialized[:head_end]}\n…[{omitted} caracteres omitidos]…\n{serialized[tail_start:]}"
     envelope = {
         "truncated": True,
-        "shown_chars": len(preview),
-        "remaining_chars": len(serialized) - len(preview),
+        "shown_chars": effective_limit,
+        "remaining_chars": omitted,
         "total_chars": len(serialized),
         "requested_chars": requested,
         "effective_limit_chars": effective_limit,
         "limit_clamped": requested > hard_limit,
         "content": preview,
-        "hint": "Call the same tool again with a larger max_chars if more content is needed.",
+        "hint": (
+            "Middle of the output omitted. Prefer a narrower read (grep, sed -n, offset, LIMIT). "
+            "Do not repeat a call with side effects just to see more output."
+        ),
     }
     return json.dumps(envelope, ensure_ascii=False)
 

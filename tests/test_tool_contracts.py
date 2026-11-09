@@ -126,6 +126,17 @@ class ToolContractTests(unittest.TestCase):
         self.assertEqual(output["remaining_chars"], output["total_chars"] - 20)
         self.assertFalse(output["limit_clamped"])
 
+    def test_global_tool_output_limit_keeps_start_and_end(self):
+        import unittest.mock
+
+        result = {"returncode": 1, "stdout": "x" * 5_000, "stderr": "fallo real"}
+        with unittest.mock.patch.dict("os.environ", {"TOOL_OUTPUT_MAX_CHARS": "300"}):
+            output = json.loads(serialize_tool_result(result))
+
+        self.assertIn('"returncode": 1', output["content"])
+        self.assertIn("fallo real", output["content"])
+        self.assertIn("caracteres omitidos", output["content"])
+
     def test_requested_tool_limit_is_clamped_to_hard_limit(self):
         import unittest.mock
 

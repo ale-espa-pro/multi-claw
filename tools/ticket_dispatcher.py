@@ -9,7 +9,8 @@ import hashlib
 import json
 import mimetypes
 import os
-import subprocess
+import re
+import signal
 import time
 import uuid
 from typing import Any
@@ -60,6 +61,11 @@ def _get_openai_client() -> AsyncOpenAI:
 # ── Constantes ───────────────────────────────────────────────────────
 
 DEFAULT_MAX_CHARS = 200_000
+MAX_STDERR_CHARS = 50_000
+DEFAULT_COMMAND_TIMEOUT = 15
+MAX_COMMAND_TIMEOUT = 120
+# Margen sobre MAX_PLAYWRIGHT_SESSION_TIMEOUT: una acción en curso no cuenta como inactiva.
+PLAYWRIGHT_SESSION_IDLE_SECONDS = 2 * 60 * 60
 DEFAULT_PLAYWRIGHT_MAX_CHARS = 12_000
 DEFAULT_PLAYWRIGHT_ELEMENT_LIMIT = 40
 DEFAULT_PLAYWRIGHT_SESSION_TIMEOUT = 300
@@ -67,15 +73,23 @@ MAX_PLAYWRIGHT_SESSION_TIMEOUT = 2_700
 FILE_HASH_ALGORITHM = "md5"
 HASH_CHUNK_BYTES = 1024 * 1024
 
-BLOCKED_COMMANDS = {
-    "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){", "fork",
-    "chmod -R 777 /", "chown -R", "shutdown", "reboot", "halt",
-    "poweroff", "init 0", "init 6", "killall", "kill -9 1",
-    "> /dev/sda", "mv / ", "wget | sh", "curl | sh", "curl | bash",
-    "wget | bash",
-}
-
-BLOCKED_PREFIXES = {"sudo", "su", "doas"}
+# Filtro orientativo, no un sandbox: bash siempre permite esquivarlo. Las órdenes se
+# buscan en posición de comando para no bloquear menciones como `grep fork`.
+_AT_COMMAND = r"(?:^|[;&|(\n]\s*)(?:\S*/)?"
+_ROOT_PATH = r"/\*?(?=\s|$)"
+BLOCKED_PREFIX = re.compile(_AT_COMMAND + r"(sudo|su|doas)(?=\s|$)")
+BLOCKED_PATTERNS = tuple(re.compile(pattern) for pattern in (
+    _AT_COMMAND + r"(?:shutdown|reboot|halt|poweroff|killall|init\s+[06]|mkfs(?:\.\w+)?)(?=\s|$)",
+    _AT_COMMAND + r"dd\s+if=",
+    rf"\brm\s+-rf\s+{_ROOT_PATH}",
+    rf"\bchmod\s+-r\s+777\s+{_ROOT_PATH}",
+    rf"\bchown\s+-r\s+\S+\s+{_ROOT_PATH}",
+    rf"\bmv\s+{_ROOT_PATH}",
+    r"\bkill\s+-9\s+1(?=\s|$)",
+    r":\(\)\s*\{",
+    r">\s*/dev/sd[a-z]",
+    r"\b(?:curl|wget)\b[^|;&\n]*\|\s*(?:ba)?sh\b",
+))
 
 # ── Utilidad de rutas ────────────────────────────────────────────────
 
@@ -119,27 +133,56 @@ def _count_remaining_tokens(content: str, max_chars: int) -> int:
 
 def _is_command_blocked(command: str) -> str | None:
     cmd_lower = command.strip().lower()
-    first_word = cmd_lower.split()[0] if cmd_lower else ""
-    for prefix in BLOCKED_PREFIXES:
-        if first_word == prefix.strip():
-            return f"comando bloqueado: no se permite '{prefix.strip()}'"
-    for pattern in BLOCKED_COMMANDS:
-        if pattern in cmd_lower:
-            return f"comando bloqueado: patrón peligroso detectado '{pattern}'"
+    prefix = BLOCKED_PREFIX.search(cmd_lower)
+    if prefix:
+        return f"comando bloqueado: no se permite '{prefix.group(1)}'"
+    for pattern in BLOCKED_PATTERNS:
+        match = pattern.search(cmd_lower)
+        if match:
+            matched = match.group(0).strip(" ;&|(\n")
+            return f"comando bloqueado: patrón peligroso detectado '{matched}'"
     return None
+
+
+_draining_readers: set[asyncio.Task] = set()
+
+
+async def _drain_stream(stream: asyncio.StreamReader, buffer: bytearray, max_bytes: int):
+    """Acumula la salida conservando solo el final para acotar la memoria."""
+    while chunk := await stream.read(64 * 1024):
+        buffer.extend(chunk)
+        if len(buffer) > max_bytes:
+            del buffer[:-max_bytes]
+
+
+def _kill_process_group(process: asyncio.subprocess.Process):
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) -> bool:
+    """Espera a que termine bash. process.wait() no sirve: también espera el EOF
+    de las tuberías, que un hijo en segundo plano puede mantener abiertas."""
+    deadline = time.monotonic() + timeout
+    while process.returncode is None:
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
 
 
 async def action_run_command(body: dict) -> dict:
     """
     Ejecuta un comando de terminal (bash).
     Requiere: command (str).
-    Opcional: timeout (int, default 15, max 30), workdir (str).
+    Opcional: timeout (int, default 15, max 120), workdir (str).
+    Al expirar el timeout mata todo el grupo de procesos y devuelve la salida parcial.
     """
     command = (body.get("command") or "").strip()
     if not command:
         return {"success": False, "error": "missing required field: command"}
 
-    timeout = min(int(body.get("timeout", 15)), 30)
+    timeout = max(min(int(body.get("timeout") or DEFAULT_COMMAND_TIMEOUT), MAX_COMMAND_TIMEOUT), 1)
 
     # El swarm arranca en su carpeta; workdir debe permanecer dentro de ella.
     # Bash puede acceder a otras rutas: esta comprobación no aísla el comando.
@@ -157,33 +200,55 @@ async def action_run_command(body: dict) -> dict:
         return {"success": False, "error": blocked, "command": command}
 
     try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            command,
-            shell=True,
-            executable="/bin/bash",
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+        # Sesión propia para que el timeout alcance a los hijos y no solo a bash.
+        process = await asyncio.create_subprocess_exec(
+            "/bin/bash", "-c", command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
             cwd=workdir,
             env={**os.environ, "LC_ALL": "C.UTF-8"},
+            start_new_session=True,
         )
-
-        stdout = result.stdout[-DEFAULT_MAX_CHARS:] if len(result.stdout) > DEFAULT_MAX_CHARS else result.stdout
-        stderr = result.stderr[-50_000:] if len(result.stderr) > 50_000 else result.stderr
-
-        return {
-            "success": result.returncode == 0,
-            "command": command,
-            "returncode": result.returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-        }
-
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": "timeout exceeded", "command": command, "timeout": timeout}
-    except Exception as e:
+    except OSError as e:
         return {"success": False, "error": str(e), "command": command}
+
+    stdout, stderr = bytearray(), bytearray()
+    # Un carácter UTF-8 ocupa hasta 4 bytes.
+    readers = [
+        asyncio.create_task(_drain_stream(process.stdout, stdout, DEFAULT_MAX_CHARS * 4)),
+        asyncio.create_task(_drain_stream(process.stderr, stderr, MAX_STDERR_CHARS * 4)),
+    ]
+    try:
+        timed_out = not await _wait_for_exit(process, timeout)
+        if timed_out:
+            _kill_process_group(process)
+            await _wait_for_exit(process, 5)
+        _, still_reading = await asyncio.wait(readers, timeout=0.5)
+    except asyncio.CancelledError:
+        for reader in readers:
+            reader.cancel()
+        raise
+    finally:
+        if process.returncode is None:
+            _kill_process_group(process)
+
+    # Un hijo en segundo plano heredó las tuberías: se siguen vaciando hasta su EOF
+    # para que no se bloquee al escribir.
+    for reader in still_reading:
+        _draining_readers.add(reader)
+        reader.add_done_callback(_draining_readers.discard)
+
+    result = {
+        "success": process.returncode == 0 and not timed_out,
+        "command": command,
+        "returncode": process.returncode,
+        "stdout": stdout.decode("utf-8", errors="replace")[-DEFAULT_MAX_CHARS:],
+        "stderr": stderr.decode("utf-8", errors="replace")[-MAX_STDERR_CHARS:],
+    }
+    if timed_out:
+        result.update(error="timeout exceeded", timeout=timeout)
+    return result
 
 
 async def action_web_fetch(body: dict) -> dict:
@@ -434,7 +499,20 @@ async def _create_playwright_session(session_id: str, body: dict, timeout_ms: in
         raise
 
 
+async def _close_idle_playwright_sessions():
+    cutoff = time.time() - PLAYWRIGHT_SESSION_IDLE_SECONDS
+    for session_id, session in list(_PLAYWRIGHT_SESSIONS.items()):
+        if session["last_used_at"] < cutoff:
+            await _close_playwright_session(session_id)
+
+
+async def close_all_playwright_sessions():
+    for session_id in list(_PLAYWRIGHT_SESSIONS):
+        await _close_playwright_session(session_id)
+
+
 async def _get_playwright_session(session_id: str, body: dict, timeout_ms: int) -> tuple[dict[str, Any], bool]:
+    await _close_idle_playwright_sessions()
     async with _PLAYWRIGHT_SESSIONS_LOCK:
         session = _PLAYWRIGHT_SESSIONS.get(session_id)
         if session is not None:

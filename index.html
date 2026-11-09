@@ -644,7 +644,8 @@ createApp({
                 apiUrl: localStorage.getItem("apiUrl") || window.location.origin,
                 sessionId: localStorage.getItem("sessionId") || genId(),
                 username: localStorage.getItem("username") || "",
-                metadata: localStorage.getItem("metadata") || "{}"
+                metadata: localStorage.getItem("metadata") || "{}",
+                apiKey: localStorage.getItem("apiKey") || ""
             },
             conversations: [],
             messages: [],
@@ -698,7 +699,7 @@ createApp({
     beforeUnmount() { window.removeEventListener("resize", this.onResize); },
     methods: {
         save() {
-            for (const k of ["apiUrl", "sessionId", "username", "metadata"])
+            for (const k of ["apiUrl", "sessionId", "username", "metadata", "apiKey"])
                 localStorage.setItem(k, this.config[k]);
         },
         restoreLayout() {
@@ -844,9 +845,22 @@ createApp({
             if (exists) await this.loadConv(this.config.sessionId);
             else { this.messages = []; this.scroll(true); }
         },
+        async api(path, options = {}) {
+            const send = () => fetch(`${this.config.apiUrl}${path}`, {
+                ...options,
+                headers: { ...options.headers, ...(this.config.apiKey ? { "X-API-Key": this.config.apiKey } : {}) }
+            });
+            const r = await send();
+            if (r.status !== 401) return r;
+            const key = (window.prompt("Esta API requiere CHAT_API_KEY:") || "").trim();
+            if (!key) return r;
+            this.config.apiKey = key;
+            this.save();
+            return send();
+        },
         async fetchConvs() {
             try {
-                const r = await fetch(`${this.config.apiUrl}/conversations?limit=100`);
+                const r = await this.api("/conversations?limit=100");
                 this.conversations = r.ok ? await r.json() : [];
             } catch { this.conversations = []; }
         },
@@ -859,7 +873,7 @@ createApp({
             this.config.sessionId = id;
             this.save();
             try {
-                const r = await fetch(`${this.config.apiUrl}/conversations/${id}`);
+                const r = await this.api(`/conversations/${id}`);
                 if (r.status === 404) { this.messages = []; }
                 else if (r.ok) { this.messages = (await r.json()).messages || []; }
                 await this.fetchConvs();
@@ -870,7 +884,7 @@ createApp({
         },
         async deleteConversation(id) {
             try {
-                await fetch(`${this.config.apiUrl}/conversations/${id}`, { method: "DELETE" });
+                await this.api(`/conversations/${id}`, { method: "DELETE" });
                 this.conversations = this.conversations.filter(c => c.session_id !== id);
                 if (id === this.config.sessionId) this.startNewConversation();
             } catch {}
@@ -916,7 +930,7 @@ createApp({
             this.autoResize();
             await this.scroll(true);
             try {
-                const r = await fetch(`${this.config.apiUrl}/chat`, {
+                const r = await this.api("/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({

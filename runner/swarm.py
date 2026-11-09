@@ -7,7 +7,8 @@ la misma cosa: el inspector reconstruye el árbol sin estado adicional.
 Presupuesto: `budget` es el número total de agentes del enjambre, raíz incluida.
 Crear un hijo con `budget=k` cuesta `1+k` al padre (su plaza más lo que le cede)
 y lo que el hijo no gasta vuelve al padre al terminar. La invariante resultante
-es que nunca se crean más agentes que el presupuesto inicial.
+es que nunca se crean más agentes que el presupuesto inicial, y `max_budget`
+acota la suma de todos los enjambres de una misma petición.
 """
 
 import asyncio
@@ -84,6 +85,7 @@ class SwarmRegistry:
         self.config = dict(config)
         self.nodes: dict[str, SwarmNode] = {}
         self.roots: list[str] = []
+        self._committed_budget = 0
         self._taken_ids = taken_ids if taken_ids is not None else set()
         self._lock = asyncio.Lock()
         self.request_semaphore = asyncio.Semaphore(max(int(self.config.get("max_concurrent", 6)), 1))
@@ -149,6 +151,12 @@ class SwarmRegistry:
         real_root = self._validate_root_path(root_path)
 
         async with self._lock:
+            available = max_budget - self._committed_budget
+            if budget > available:
+                raise SwarmError(
+                    f"presupuesto de la petición insuficiente: quedan {available} de {max_budget} agentes"
+                )
+            self._committed_budget += budget
             agent_id = self._claim_id(slugify(name or os.path.basename(real_root), "swarm"))
             node = SwarmNode(
                 agent_id=agent_id,
@@ -262,8 +270,10 @@ class SwarmRegistry:
             returned = node.budget
             node.budget = 0
             parent = self.nodes.get(node.parent_id) if node.parent_id else None
-            if parent is not None and returned:
+            if parent is not None:
                 parent.budget += returned
+            else:
+                self._committed_budget -= returned
         return returned
 
 

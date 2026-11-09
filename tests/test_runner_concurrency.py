@@ -99,7 +99,7 @@ class _InMemoryConversationStore:
                 },
             )
 
-    async def get_conversation(self, session_id):
+    async def get_conversation(self, session_id, visible_only=False):
         async with self.lock:
             conversation = self.conversations.get(session_id)
             return copy.deepcopy(conversation) if conversation is not None else None
@@ -259,6 +259,7 @@ class RunnerConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("boom")
 
         runner.agent_builder.ticket_dispatcher = {"ok_tool": ok_tool, "boom_tool": boom_tool}
+        runner.agent_builder.get_tools_for_agent = lambda agent_name: [{"name": "ok_tool"}, {"name": "boom_tool"}]
 
         calls = [
             {"type": "function_call", "call_id": "c1", "name": "boom_tool", "arguments": "{}"},

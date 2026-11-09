@@ -1,5 +1,6 @@
 import json
 import unittest
+from types import SimpleNamespace
 
 from providers import resolve_provider_name
 from providers import anthropic_messages as anthropic
@@ -25,6 +26,21 @@ class _FakeResponse:
         self.content = content
         self.output = output
         self.usage = usage
+
+
+class OpenAIRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oversized_context_is_truncated_instead_of_rejected(self):
+        captured = {}
+
+        class _Responses:
+            async def create(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(output=[], usage=None)
+
+        provider = openai_provider.OpenAIResponsesProvider(SimpleNamespace(responses=_Responses()))
+        await provider.request("system", [], [], {"model": "m", "reasoning": {}, "parallel_tool_calls": False})
+
+        self.assertEqual(captured["truncation"], "auto")
 
 
 class ProviderResolutionTests(unittest.TestCase):

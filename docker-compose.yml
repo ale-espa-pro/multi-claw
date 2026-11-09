@@ -1,8 +1,10 @@
 services:
   app:
     build: .
+    # environment tiene prioridad: aquí llegan los ajustes opcionales (MEMORY_*, TOOL_OUTPUT_*...).
+    env_file: .env
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8000}:8000"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -41,7 +43,7 @@ services:
       POSTGRES_USER: ${DOCKER_MULTIAGENT_PG_USER:-admin}
       POSTGRES_PASSWORD: ${DOCKER_MULTIAGENT_PG_PASSWORD:-multi-claw-dev}
     ports:
-      - "${POSTGRES_PUBLIC_PORT:-5433}:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PUBLIC_PORT:-5433}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
