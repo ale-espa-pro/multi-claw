@@ -7,85 +7,75 @@
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![OpenAI](https://img.shields.io/badge/OpenAI-Responses_API-111111?style=for-the-badge&logo=openai&logoColor=white)
 
-**Multi-Claw es un laboratorio local de agentes autónomos con memoria profunda.**
+**Agentes que ejecutan tareas, delegan trabajo y conservan una memoria consultable de lo que hicieron.**
 
-No es "un chatbot con herramientas": es un runtime para agentes que trabajan, delegan, ejecutan, guardan trazabilidad y luego pueden reconstruir qué pasó.
+Runtime local y experimental que combina herramientas, workflows y memoria persistente para reconstruir **qué ocurrió, cuándo y qué agente intervino**.
 
-```text
-Multi-Claw = multiagente + memoria accionable + workflows + runtime local
-```
+![Chat/API → AgentRunner → agentes y herramientas; PostgreSQL guarda y recupera trazas; Redis mantiene la caché.](docs/architecture.png)
 
-![Arquitectura de Multi-Claw](docs/architecture.png)
+## Qué puedes hacer
 
-## Highlights
+- **Delegar tareas:** agentes especializados y enjambres con presupuestos controlados por el servidor.
+- **Ejecutar trabajo:** terminal, edición de archivos, navegación con Playwright y tareas programadas.
+- **Reutilizar procedimientos:** workflows versionables con instrucciones, prompts y plantillas SQL.
+- **Consultar el historial:** buscar por sesión, fecha, herramienta, subagente, texto o similitud.
+- **Inspeccionar ejecuciones:** conversaciones, llamadas a herramientas y árboles de agentes en una misma traza.
+- **Ajustar recursos:** elegir modelos por agente y repartir contexto entre subtareas.
 
-- 🧠 **Memoria operacional:** conversaciones, chunks, `context_jsonb`, decisiones, tools, subagentes y artefactos.
-- ⚙️ **Agentes autónomos:** tareas periódicas tipo cron, con estado y trazabilidad.
-- 🧩 **Workflows versionables:** playbooks, prompts y SQL templates como habilidades reutilizables.
-- 💸 **Menos coste/context rotting:** subtareas delegables a agentes/modelos más baratos.
-- 🛡️ **Aislamiento extra:** agentes, contratos y tools separados reducen superficie ante prompt injection.
-- 🔎 **Retrieval multitemporal:** consultas por sesión, fecha, evento, herramienta, subagente o texto literal.
+> Uso interno con historiales de más de 20 millones de tokens; pendiente de benchmark formal.
 
-> En uso real interno ha funcionado bien con historiales de más de 20M tokens. Falta benchmark formal: prometedor, no una garantía.
+## Arranque rápido con Docker
 
-## Frente A OpenClaw Y Similares
-
-OpenClaw está más maduro como producto: mejor instalación, más canales, más ecosistema y una memoria muy trabajada con archivos, SQLite/hybrid search, QMD, Honcho y wiki.
-
-Multi-Claw vende otra cosa: **memoria como caja negra consultable de la ejecución del agente**.
-
-| Area | OpenClaw / similares | Multi-Claw |
-| --- | --- | --- |
-| Producto | Más pulido | Más experimental y hackeable |
-| Memoria | Notas, sesiones, índices y backends | PostgreSQL + chunks + `context_jsonb` |
-| Foco | Asistente local completo | Auditoría, retrieval y automatización profunda |
-| Recall | Knowledge/user memory | Acciones, tools, subagentes y temporalidad |
-| Coste | Runtime generalista | Delegacion multiagente para contener contexto |
-| Seguridad | Ecosistema más maduro | Aislamiento por agentes/contratos como capa adicional |
-
-Referencias: [OpenClaw Memory](https://docs.openclaw.ai/concepts/memory) y [OpenClaw Multi-Agent](https://docs.openclaw.ai/concepts/multi-agent).
-
-## Casos Que Quiere Resolver
-
-- "¿Qué decisión tomó el agente sobre este proyecto hace tres semanas?"
-- "¿Qué subagente generó este archivo y bajo qué contrato?"
-- "¿Qué tool falló antes de que apareciera este bug?"
-- "¿Dónde se mezclan tema A, fecha B y herramienta C?"
-- "¿Qué preferencias del usuario cambiaron esta respuesta?"
-
-## Estado Real
-
-Experimental, local-first y todavía no empaquetado como producto. Necesita `OPENAI_API_KEY`, PostgreSQL y, de forma recomendada, Redis. `pgvector` activa la búsqueda vectorial; sin él, los embeddings quedan guardados pero no hay retrieval vectorial real.
-
-No expongas esto a Internet sin revisar auth, CORS, tools de comandos y permisos de escritura.
-
-## Arranque Rápido Para Un Clone Nuevo
+Necesitas Git, Docker Compose y una clave de OpenAI con acceso a los modelos de [la configuración](agents/agent_config.json).
 
 ```bash
-git clone <url-del-repo>
+git clone https://github.com/ale-espa-pro/multi-claw.git
 cd multi-claw
-export OPENAI_API_KEY="sk-..."
+cp .env.example .env
+# Edita .env: OPENAI_API_KEY y CHAT_API_KEY; cambia la contraseña de Postgres.
 docker compose up --build
 ```
 
-Abre `http://localhost:8000`.
+Compose crea PostgreSQL con pgvector y Redis, persiste sus datos y monta `./working-dir`.
 
-## Stack
+- **Chat:** [localhost:8000](http://localhost:8000).
+- **Inspector de agentes:** [localhost:8000/inspector](http://localhost:8000/inspector); admite `X-API-Key`.
+- **API interactiva:** [localhost:8000/docs](http://localhost:8000/docs).
 
-| Capa | Tecnología |
-| --- | --- |
-| API | FastAPI + Uvicorn |
-| Agentes | OpenAI Responses API |
-| Memoria | PostgreSQL, pgvector/HNSW, FTS, JSONB |
-| Cache | Redis |
-| UI | `index.html` |
-| Automatización | crons + workflows |
-| Canales | HTTP + Twilio/WhatsApp opcional |
-| Tools | archivos, comandos, docs, Playwright |
+**Autenticación:** con `CHAT_API_KEY` definida, envía `X-API-Key` en las peticiones. El chat web la pide la primera vez y la recuerda en el navegador. Sin clave, la API y su terminal quedan abiertas: úsalo solo en un entorno local de confianza.
 
-No commitees `.env`, claves, dumps, screenshots privados ni memoria personal.
+Para detener los servicios conservando datos: `docker compose down`.
 
-## Configuración Mínima
+## Estado y alcance
+
+El runtime y los datos residen en tu máquina; modelos y embeddings usan APIs externas. Requiere `OPENAI_API_KEY` y PostgreSQL; Redis es recomendable. Sin pgvector se guardan embeddings, pero no hay búsqueda vectorial.
+
+La separación de agentes y herramientas **no constituye un sandbox** ni garantiza protección frente a inyección de prompts.
+
+## Frente a OpenClaw
+
+Multi-Claw prioriza la **memoria de ejecución**: acciones, herramientas, delegaciones y contexto.
+
+| Aspecto | OpenClaw | Multi-Claw |
+| --- | --- | --- |
+| Memoria | Archivos Markdown, notas y búsqueda | PostgreSQL, fragmentos y `context_jsonb` |
+| Agentes | Espacios de trabajo y sesiones por agente | Especialistas y enjambres con trazas por nodo |
+| Organización | Enrutamiento de mensajes entre agentes | Delegación de tareas y árbol de informes |
+
+Comparación de diseño: [memoria de OpenClaw](https://docs.openclaw.ai/concepts/memory) y [enrutamiento multiagente](https://docs.openclaw.ai/concepts/multi-agent).
+
+## Preguntas que ayuda a resolver
+
+- «¿Qué decisión tomó el agente sobre este proyecto hace tres semanas?»
+- «¿Qué subagente generó este archivo y bajo qué contrato?»
+- «¿Qué herramienta falló antes de que apareciera este error?»
+- «¿Dónde coinciden este tema, esta fecha y esta herramienta?»
+
+## Configuración
+
+[`.env.example`](.env.example) contiene los valores para Docker. Los modelos, herramientas y límites por agente se definen en [`agents/agent_config.json`](agents/agent_config.json). Los modelos `claude-*` requieren además `ANTHROPIC_API_KEY`.
+
+**Sin Docker**, configura en `.env` tus servicios:
 
 ```env
 OPENAI_API_KEY=sk-...
@@ -102,146 +92,142 @@ MULTIAGENT_PG_SCHEMA=multiagente
 REDIS_URL=redis://localhost:6379
 ```
 
-Opcionales útiles: `MEMORY_RETRIEVAL_MODE=vector|keyword|hybrid`, `REDIS_CONTEXT_TTL_SECONDS`, `TOOL_OUTPUT_MAX_CHARS`, `TOOL_OUTPUT_HARD_MAX_CHARS`, `AGENT_API_CONCURRENCY`, `TWILIO_*`, `CRONS_PATH`, `WORKFLOW_PATH`, `USER_PREFERENCES_PATH`, `ALLOWED_WRITE_ROOTS`.
+Ajustes útiles: `MEMORY_RETRIEVAL_MODE` (`vector`, `keyword` o `hybrid`), `MEMORY_QUERY_TIMEOUT_SECONDS`, `REDIS_CONTEXT_TTL_SECONDS`, `TOOL_OUTPUT_MAX_CHARS`, `TOOL_OUTPUT_HARD_MAX_CHARS`, `CONTEXT_COMPACT_OVER_CHARS` (`0` lo desactiva), `CONTEXT_CHECKPOINT_SECONDS`, `AGENT_API_CONCURRENCY`, `CORS_ORIGINS` y `ALLOWED_WRITE_ROOTS`. En Docker el servicio carga `.env`; los valores de `environment` tienen prioridad.
 
-## Arranque Con Docker
+### Docker con servicios existentes
 
-Para una instalación nueva, copia `.env.example` a `.env`, rellena `OPENAI_API_KEY` y arranca:
-
-```bash
-docker compose up --build
-```
-
-Esto crea Postgres y Redis en contenedores, monta `./working-dir` en la app y expone la API en `http://localhost:8000`.
-
-Si quieres usar Postgres/Redis ya existentes en tu host, copia `docker-compose.host-db.example.yml` a `docker-compose.local.yml`, ajusta las variables `DOCKER_MULTIAGENT_PG_*` en `.env` y arranca con:
+Copia [`docker-compose.host-db.example.yml`](docker-compose.host-db.example.yml) a `docker-compose.local.yml`. Ajusta en `.env` las variables `DOCKER_MULTIAGENT_PG_*` y `DOCKER_REDIS_URL` a tus servicios; esta variante usa la red del host.
 
 ```bash
 docker compose -f docker-compose.local.yml up --build
 ```
 
-Para parar:
+### Ejecución sin Docker
 
-```bash
-docker compose down
-```
-
-## Arranque Local Sin Docker
-
-Necesitas Python 3.11 o posterior y [`uv`](https://docs.astral.sh/uv/getting-started/installation/). Desde la raíz del proyecto:
+Con Python 3.11+, [`uv`](https://docs.astral.sh/uv/getting-started/installation/) y PostgreSQL accesible, ejecuta desde la raíz:
 
 ```bash
 uv sync --locked
 uv run playwright install chromium
-uv run uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Si arrancas desde otro directorio, las rutas relativas de `.env` se resuelven respecto a la raíz del proyecto mediante `app_paths.py`.
+Las rutas de trabajo relativas se resuelven desde la raíz del proyecto mediante `app_paths.py`.
 
 ## API
 
-```http
-POST /chat
-Content-Type: application/json
-X-API-Key: <si CHAT_API_KEY está definido>
+Primera petición; sustituye `change-me` por tu `CHAT_API_KEY`:
+
+```bash
+curl http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: change-me' \
+  -d '{"session_id":"demo","username":"usuario","message":"Hola"}'
 ```
 
-```json
-{
-  "session_id": "demo",
-  "username": "usuario",
-  "message": "Hola",
-  "conversation_type": null
-}
-```
+`POST /chat` también acepta `conversation_type` e `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
 
-También acepta `images` con `url`, `path`, `data_url`, `file_id` o `base64`.
+| Ruta | Función |
+| --- | --- |
+| `GET /conversations` | Listar conversaciones |
+| `GET /conversations/{session_id}` | Leer una conversación |
+| `GET /conversations/{session_id}/trace` | Consultar el árbol de agentes y sus trazas |
+| `DELETE /conversations/{session_id}` | Eliminar una conversación |
+| `POST /twilio/webhook` | Recibir mensajes de WhatsApp mediante Twilio |
 
-- `GET /conversations`
-- `GET /conversations/{session_id}`
-- `DELETE /conversations/{session_id}`
-- `POST /twilio/webhook`
+## Cómo funciona la memoria
 
-## Memoria
+Los fragmentos permiten encontrar información; las trazas, reconstruir la ejecución:
 
-La parte fuerte. Multi-Claw trata la memoria como historial consultable de ejecución, no solo como notas o resumen inyectado.
+1. Divide el texto conversacional en fragmentos semánticos y genera embeddings con OpenAI.
+2. Guarda los fragmentos en `multiagente.conversation_chunks`.
+3. Recupera información por búsqueda vectorial, palabras clave o modo híbrido.
+4. Consulta `conversations.context_jsonb` cuando necesita texto literal, cronología o llamadas a herramientas.
 
-1. Divide texto conversacional en chunks semánticos.
-2. Genera embeddings con OpenAI.
-3. Guarda chunks en `multiagente.conversation_chunks`.
-4. Recupera por vector, keyword o híbrido.
-5. Baja a `conversations.context_jsonb` cuando hace falta literalidad o cronología.
+Al empezar un turno, la entrada y salida de herramientas anterior al turno previo se envía resumida si supera 2.000 caracteres. `context_jsonb` conserva siempre el original.
 
-El workflow `working-dir/workflows/memory_retrieval_tutorial` documenta el playbook de retrieval: clasificar intención, reducir espacio de búsqueda, combinar FTS/vector/híbrido y abrir JSON solo cuando compensa.
+El [workflow de recuperación](working-dir/workflows/memory_retrieval_tutorial/README.md) explica cómo acotar búsquedas, combinar texto y vectores y consultar el JSON.
 
-## Enjambres De Agentes
+## Enjambres de agentes
 
-`deploy_swarm` despliega un árbol de agentes efímeros sobre un árbol de carpetas. La invariante es que **el `agent_id` de un agente es su ruta relativa**, así que jerarquía de agentes, de directorios y de carriles en `context_jsonb` son la misma cosa y el inspector reconstruye el árbol sin estado adicional.
+`deploy_swarm` crea agentes efímeros organizados por carpetas. El **`agent_id` es su ruta relativa**: carpetas, jerarquía y trazas comparten estructura.
 
 ```text
 deploy_swarm(root_path=..., budget=12, task=...)
-└── auditoria                    carpeta asignada: auditoria/
-    ├── seguridad                carpeta asignada: auditoria/seguridad/
-    │   └── dependencias         carpeta asignada: auditoria/seguridad/dependencias/
-    └── rendimiento              carpeta asignada: auditoria/rendimiento/
+└── auditoria
+    ├── seguridad
+    │   └── dependencias
+    └── rendimiento
 ```
 
-- **Terminal por defecto.** Cada nodo recibe `run_command` y los hijos heredan ese acceso. La carpeta asignada organiza sus artefactos; no es un sandbox del sistema operativo. `allow_shell=false` retira la terminal de una rama y sus descendientes no pueden recuperarla. `edit_file` sí limita las modificaciones a la carpeta del nodo mediante un `ContextVar` fijado por el runner; inspeccionar archivos externos está permitido.
-- **Presupuesto.** `budget` es el número total de agentes (1-50), raíz incluida. Crear un hijo con `budget=k` cuesta `1+k` al padre y lo que el hijo no gasta se le devuelve al terminar. El tope lo lleva el servidor, no el prompt.
-- **REPORT.md.** Cada agente termina escribiendo un informe con resultado, artefactos, ejecuciones, limitaciones y siguientes pasos. El padre lo recibe ya leído en el resultado de la llamada. Las ramas sin terminal reciben un archivo inicial para completarlo con `edit_file`; no pueden crear archivos nuevos. Si falta el informe o queda vacío o sin completar, el agente recibe un turno extra para escribirlo y, si sigue faltando, el resultado se marca como `report_missing`.
-- **Efímeros pero trazables.** Un nodo vive una sola invocación y su continuidad es el REPORT.md, pero su carril de contexto se persiste entero en `context_jsonb`: todo el árbol queda disponible para `memory_query` y para `/conversations/{id}/trace`.
+- **Acceso:** cada nodo recibe `run_command` por defecto. Su carpeta organiza artefactos, pero no restringe la terminal. `allow_shell=false` retira ese acceso de la rama; sus descendientes no pueden recuperarlo. `edit_file` limita las modificaciones a la carpeta asignada y permite inspeccionar archivos externos.
+- **Presupuesto:** `deploy_swarm(budget=N)` cuenta todos los agentes, raíz incluida (máximo predeterminado: 50). Al crear un hijo, `budget=k` reserva su plaza y otras `k` para descendientes: cuesta `1+k` al padre. El presupuesto no usado se devuelve al terminar.
+- **Informe:** cada nodo escribe `REPORT.md` con resultados, artefactos y limitaciones; el padre recibe su contenido. Sin terminal, el agente completa un informe inicial con `edit_file` y no puede crear archivos. Si no lo completa tras un turno adicional, el resultado se marca `report_missing`.
+- **Trazabilidad:** cada nodo vive una invocación, pero conserva su contexto en `context_jsonb`, consultable con `memory_query` y desde el inspector.
 
-Se configura en el bloque `_swarm` de `agents/agent_config.json`: modelo, toolset, `max_depth`, `max_concurrent`, `max_budget` y `max_iterations`.
+El bloque `_swarm` configura modelo, herramientas, profundidad, concurrencia, presupuesto e iteraciones.
 
-## Terminal Y Edición De Archivos
+## Terminal y edición de archivos
 
-`run_command` es la herramienta general para leer y crear archivos, buscar y ejecutar scripts, incluido Python. Está disponible para ExecutorAgent, DeviceManagerAgent, PlaywrightSessionAgent y, por defecto, los agentes del enjambre. Las herramientas `run_python`, `read_file`, `write_file` y `file_hash` se han retirado.
+`run_command` permite leer y crear archivos, buscar y ejecutar scripts. Lo usan ExecutorAgent, DeviceManagerAgent, PlaywrightSessionAgent y, por defecto, los enjambres.
 
-`edit_file` reúne la inspección de una versión y su edición protegida:
+`edit_file` modifica archivos existentes con detección de conflictos:
 
-1. Llama con `action="inspect"` y `path`. Devuelve el contenido y `file_hash.value` (MD5 de la misma versión leída); `offset` y `max_chars` permiten leer por fragmentos.
-2. Llama con `action="edit"`, `path`, `old_text` no vacío, `new_text` y `expected_file_hash` igual al hash inspeccionado. Usa `replace_all=true` solo para sustituir todas las apariciones.
-3. Si el archivo cambió, la edición devuelve `file_conflict` sin escribir. Repite `inspect`, revisa los cambios y prepara la edición sobre esa versión.
+1. `action="inspect"` con `path` devuelve contenido y `file_hash.value`. `offset` y `max_chars` permiten inspeccionar fragmentos.
+2. `action="edit"` recibe `path`, `old_text` no vacío, `new_text` y `expected_file_hash`. Usa `replace_all=true` para sustituir todas las coincidencias.
+3. Si cambió el archivo, devuelve `file_conflict` sin escribir: vuelve a inspeccionar antes de editar.
 
-`inspect` calcula el hash sobre los mismos bytes que devuelve como contenido; evita leer y calcular el hash en operaciones separadas. Los comandos de shell no aplican este control de versiones; usa `edit_file` al modificar archivos existentes para aprovecharlo.
+El hash MD5 identifica la versión completa leída, incluso al inspeccionar fragmentos. Los comandos de terminal no aplican este control.
+
+## Stack
+
+| Capa | Tecnología |
+| --- | --- |
+| API e interfaces | FastAPI, Uvicorn, chat e inspector HTML |
+| Modelos | OpenAI Responses API; Anthropic opcional |
+| Memoria | PostgreSQL, pgvector/HNSW, búsqueda de texto y JSONB |
+| Caché | Redis |
+| Automatización | Workflows, tareas programadas y enjambres |
+| Integraciones | HTTP, Twilio/WhatsApp y Playwright |
 
 ## Tests
 
 ```bash
-uv run python -m unittest
+OPENAI_API_KEY=dev-only uv run python -m unittest
 ```
 
-Los tests son unitarios. Conviene tener `OPENAI_API_KEY` definida aunque sea con un valor de desarrollo; no hacen llamadas reales a OpenAI.
+Pruebas unitarias sin llamadas a OpenAI; la clave ficticia permite inicializar clientes.
 
-## Seguridad Antes De Compartir O Exponer
+## Antes de compartir o exponer
 
-Herramienta local con mucho poder. Antes de compartir: `CHAT_API_KEY`, CORS restringido, contraseñas cambiadas, Postgres/Redis no expuestos, `ALLOWED_WRITE_ROOTS` limitado y revisión de `working-dir/`.
+Configura `CHAT_API_KEY`, define `CORS_ORIGINS` si accedes desde otro origen (por defecto solo `localhost`), cambia contraseñas y limita `ALLOWED_WRITE_ROOTS`. Revisa la terminal: los límites de `edit_file` no restringen comandos.
 
-## Mejoras Recomendadas
+Compose publica la API y PostgreSQL (`5433`) solo en `127.0.0.1`; `APP_BIND_ADDRESS` y `POSTGRES_BIND_ADDRESS` lo cambian. Protege los puertos que expongas. No subas `.env`, claves, volcados, capturas privadas ni memoria personal; revisa `working-dir/` antes de compartirlo.
 
-- `.env.example` sin secretos.
-- Modo `dev/prod` claro.
-- Healthcheck de API/DB/Redis/OpenAI.
-- CI con `uv run python -m unittest` y build Docker.
-- Benchmarks formales de memoria: recall, precisión, coste y temporalidad.
-- Hardening de tools, CORS, auth y permisos multiusuario.
+## Próximas mejoras
+
+- Separar claramente los modos de desarrollo y producción.
+- Añadir comprobaciones de salud de la API y sus dependencias.
+- Automatizar pruebas unitarias y build de Docker en CI.
+- Medir precisión, recuperación, coste y temporalidad de la memoria.
+- Reforzar autenticación, CORS, herramientas y permisos multiusuario.
 
 ## Estructura
 
 ```text
 .
-├── main.py
-├── app_paths.py
-├── index.html
+├── main.py                  # API y arranque
+├── app_paths.py             # Resolución de rutas
+├── index.html / inspector.html
 ├── docs/architecture.png
-├── agents/
-├── runner/
-├── tools/
-│   └── memoryTools/
-├── data/
+├── agents/                  # Configuración y prompts
+├── runner/                  # Ejecución, contexto y enjambres
+├── providers/               # OpenAI y Anthropic
+├── tools/memoryTools/       # Fragmentación y recuperación
+├── data/                    # Persistencia y trazas
 ├── integrations/twilio/
 ├── tests/
-├── working-dir/workflows/memory_retrieval_tutorial/
+├── working-dir/             # Artefactos, memoria y workflows
 ├── Dockerfile
 └── docker-compose.yml
 ```

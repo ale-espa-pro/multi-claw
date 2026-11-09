@@ -3,23 +3,23 @@
         "max_iterations": 400
     },
     "_defaults": {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6.1-sol",
         "reasoning": {
-            "effort": "high",
+            "effort": "medium",
             "summary": "auto"
         },
         "parallel_tool_calls": false,
         "max_iterations": 10
     },
     "_swarm": {
-        "model": "gpt-5.6-luna",
+        "model": "gpt-6.1-sol",
         "max_iterations": 250,
         "max_depth": 4,
         "max_concurrent": 6,
         "max_budget": 50,
         "report_max_chars": 40000,
         "parallel_tool_calls": true,
-        "reasoning": {"effort": "xhigh", "summary": "auto"},
+        "reasoning": {"effort": "medium", "summary": "auto"},
         "tools": ["edit_file", "web_fetch", "interpret_image", "memory_query", "spawn_agent"],
         "shell_tools": ["run_command"]
     },
@@ -32,7 +32,7 @@
         "tools": [{"type": "web_search"}],
         "json_response": false,
         "parallel_tool_calls": true,
-        "model": "gpt-5.6-luna"
+        "model": "gpt-6.1-sol"
     },
     "DeviceManagerAgent": {
         "tools": ["run_command", "edit_file", "WebSearchAgent", "PlaywrightSessionAgent", "memory_query", "playwright_navigate", "web_fetch", "interpret_image"],
